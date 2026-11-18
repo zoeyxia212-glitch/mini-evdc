@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mini-evdc"
-version = "1.4.0"
+version = "1.5.0"
 description = "A simplified enterprise virtual data center plus a multi-cloud (Alibaba Cloud, AWS, Azure) integration service"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -17,9 +17,23 @@ evdc = "evdc.__main__:main"
 
 [project.optional-dependencies]
 aws = ["boto3>=1.34"]
+aliyun = ["alibabacloud_ecs20140526>=4.0", "alibabacloud_vpc20160428>=6.0", "alibabacloud_tea_openapi>=0.3"]
+azure = ["azure-identity>=1.15", "azure-mgmt-compute>=30.0", "azure-mgmt-network>=25.0"]
+all = ["mini-evdc[aws,aliyun,azure]"]
 
 [tool.setuptools.packages.find]
 include = ["evdc*"]
 
 [tool.setuptools.package-data]
 evdc = ["web/*.html"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "B", "I", "UP"]
+ignore = ["E731"]          # small lambdas in tests and tables are fine
+
+[tool.ruff.lint.isort]
+known-first-party = ["evdc", "tests"]

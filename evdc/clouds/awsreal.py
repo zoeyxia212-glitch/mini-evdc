@@ -18,10 +18,10 @@ environment variables, or an instance role).
 """
 from __future__ import annotations
 
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
-from ..errors import (AuthError, CloudApiError, IncorrectState, ResourceNotFound, ThrottledError,
-                      TransientError)
+from ..errors import AuthError, CloudApiError, IncorrectState, ResourceNotFound, ThrottledError, TransientError
 
 THROTTLE_CODES = {"RequestLimitExceeded", "Throttling", "ThrottlingException", "TooManyRequestsException"}
 AUTH_CODES = {"AuthFailure", "UnauthorizedOperation", "InvalidClientTokenId", "SignatureDoesNotMatch",

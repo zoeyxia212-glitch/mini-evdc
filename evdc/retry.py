@@ -11,8 +11,9 @@ import concurrent.futures
 import functools
 import random
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Callable, TypeVar
+from typing import TypeVar
 
 from .errors import ApiTimeout, AuthError, is_retryable
 from .logs import get_logger

@@ -18,13 +18,31 @@ from __future__ import annotations
 import ipaddress
 import re
 import threading
+from collections.abc import Callable
 from contextlib import contextmanager
-from typing import Callable
 
 from .errors import EvdcError, InvalidState, NotFound, QuotaExceeded
 from .logs import get_logger
-from .models import (VDC, VM, CloudResource, DistributedRule, FirewallRule, NatRule, Network, NetworkType, Org,
-                     PowerState, Quota, ResourceStatus, Snapshot, Task, Template, new_id, now, to_dict)
+from .models import (
+    VDC,
+    VM,
+    CloudResource,
+    DistributedRule,
+    FirewallRule,
+    NatRule,
+    Network,
+    NetworkType,
+    Org,
+    PowerState,
+    Quota,
+    ResourceStatus,
+    Snapshot,
+    Task,
+    Template,
+    new_id,
+    now,
+    to_dict,
+)
 
 log = get_logger("evdc.core")
 

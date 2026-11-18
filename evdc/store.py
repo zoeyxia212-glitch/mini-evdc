@@ -73,6 +73,17 @@ CREATE TABLE IF NOT EXISTS policy_runs (
     policy   TEXT, ts TEXT, dry_run INTEGER, scanned INTEGER, matched INTEGER
 );
 
+CREATE TABLE IF NOT EXISTS audit (
+    id      INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts      TEXT NOT NULL,
+    user    TEXT,
+    role    TEXT,
+    method  TEXT NOT NULL,
+    path    TEXT NOT NULL,
+    status  INTEGER NOT NULL,
+    client  TEXT
+);
+
 CREATE TABLE IF NOT EXISTS users (
     name      TEXT PRIMARY KEY,
     key_hash  TEXT UNIQUE NOT NULL,
@@ -356,6 +367,23 @@ class Store:
         with self._lock:
             rows = self._conn.execute("SELECT * FROM policy_runs ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
         return [{**dict(r), "dry_run": bool(r["dry_run"])} for r in rows]
+
+    # -- API audit trail ------------------------------------------------------------
+    def audit(self, user: str | None, role: str | None, method: str, path: str, status: int, client: str) -> None:
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO audit (ts, user, role, method, path, status, client) VALUES (?,?,?,?,?,?,?)",
+                (now(), user, role, method, path, status, client))
+            self._conn.commit()
+
+    def audit_log(self, limit: int = 100, user: str | None = None) -> list[dict]:
+        sql, args = "SELECT * FROM audit", []
+        if user:
+            sql += " WHERE user=?"
+            args.append(user)
+        with self._lock:
+            rows = self._conn.execute(sql + " ORDER BY id DESC LIMIT ?", (*args, limit)).fetchall()
+        return [dict(r) for r in rows]
 
     # -- users -------------------------------------------------------------------
     def add_user(self, name: str, key_hash: str, role: str, org_id: str | None) -> None:

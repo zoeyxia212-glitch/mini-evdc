@@ -4,12 +4,12 @@ import unittest
 import urllib.error
 import urllib.request
 
-from tests.testmanage import first, make_app
 from evdc.api import serve
 from evdc.errors import EvdcError
 from evdc.models import CloudResource, ResourceStatus
 from evdc.policy import Policy, matches
 from evdc.pricing import cost_report, monthly_cost
+from tests.testmanage import first, make_app
 
 
 def res(**kw) -> CloudResource:

@@ -34,7 +34,8 @@ Access: S = system_admin only, T = tenant (org_admin / viewer of the owning org,
     POST   /vdcs/{vdc}/vms   {name, network_id, template_id | vcpu+memory_gb+disk_gb+os, tags, power_on}  T W
     GET    /vms/{vm}                                  T
     DELETE /vms/{vm}                                  T W
-    POST   /vms/{vm}/power   {action}                 T W  power_on | power_off | shutdown_guest | reset | suspend | discard_suspend
+    POST   /vms/{vm}/power   {action}                 T W
+           action: power_on | power_off | shutdown_guest | reset | suspend | discard_suspend
     PUT    /vms/{vm}/size    {vcpu, memory_gb, disk_gb}  T W
     PUT    /vms/{vm}/tags    {tags: [...]}            T W
     POST   /vms/{vm}/snapshot                         T W
@@ -70,7 +71,10 @@ Access: S = system_admin only, T = tenant (org_admin / viewer of the owning org,
     POST   /policies         {policy JSON}            S  add or replace a policy
     POST   /policies/run     {name | policy, dry_run=true}   R for dry runs, S to act
     GET    /policies/runs                             R
-  Monitoring & UI
+  Audit
+    GET    /audit?limit=&user=                        S  every write and every refused request: who, what, result
+  Monitoring, docs & UI
+    GET    /openapi.json                              public, OpenAPI 3 description of this API
     GET    /metrics                                   public, Prometheus text format
     GET    / or /dashboard                            public page; it asks for an API key and calls the API
 """
@@ -81,14 +85,22 @@ import io
 import json
 import re
 from dataclasses import dataclass, field
-from pathlib import Path
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from .app import App
 from .auth import AuthService, Forbidden, Principal, Unauthorized
-from .errors import (CloudApiError, EvdcError, IncorrectState, InvalidState, NotFound, QuotaExceeded,
-                     ResourceNotFound, SyncInProgress)
+from .errors import (
+    CloudApiError,
+    EvdcError,
+    IncorrectState,
+    InvalidState,
+    NotFound,
+    QuotaExceeded,
+    ResourceNotFound,
+    SyncInProgress,
+)
 from .logs import get_logger
 from .metrics import render as render_metrics
 from .models import DistributedRule, FirewallRule, NatRule, NetworkType, Quota, to_dict
@@ -428,6 +440,13 @@ def build_routes(app: App):
     def policies_runs(c):
         return 200, store.policy_runs()
 
+    def audit(c):
+        system(c)
+        return 200, store.audit_log(int(c.query.get("limit", 100)), c.query.get("user"))
+
+    def openapi(c):
+        return 200, openapi_spec(routes_table, __doc__)
+
     def dashboard(c):
         html = (Path(__file__).parent / "web" / "dashboard.html").read_text(encoding="utf-8")
         return 200, Raw(html, "text/html; charset=utf-8",
@@ -453,7 +472,7 @@ def build_routes(app: App):
         return (202 if result.changed else 200), result.__dict__
 
     ID = r"(?P<{}>[\w-]+)"
-    return [
+    routes_table = [
         ("GET", r"/health", health, False),
         ("GET", r"/me", me, True),
         ("GET", r"/users", users_list, True),
@@ -509,7 +528,123 @@ def build_routes(app: App):
         ("GET", r"/policies/runs", policies_runs, True),
         ("GET", r"/metrics", metrics, False),
         ("GET", r"/(?:dashboard)?", dashboard, False),
+        ("GET", r"/audit", audit, True),
+        ("GET", r"/openapi\.json", openapi, False),
     ]
+    return routes_table
+
+
+_DOC_LINE = re.compile(r"^\s{4}(GET|POST|PUT|DELETE)\s+(/\S*)\s*(.*)$")
+_PARAM = re.compile(r"\(\?P<(\w+)>[^)]*\)")
+_ACCESS = {"S": "system admin only", "T": "users of the owning org (or a system admin)", "W": "write: viewers refused",
+           "R": "any signed-in user", "public": "no API key needed"}
+
+
+SUMMARIES = {
+    "health": "Service health and configured accounts", "me": "The caller's identity and role",
+    "users_list": "List users", "users_create": "Create a user and return its API key once",
+    "users_delete": "Delete a user", "orgs_list": "List orgs", "orgs_create": "Create an org",
+    "orgs_delete": "Delete an empty org", "vdcs_list": "List an org's VDCs", "vdc_create": "Create a VDC with a quota",
+    "vdc_get": "Get a VDC and its usage", "vdc_quota": "Change a VDC's quota", "vdc_delete": "Delete an empty VDC",
+    "nets_list": "List a VDC's networks", "net_create": "Create a network", "net_delete": "Delete an unused network",
+    "tpl_list": "List an org's templates", "tpl_create": "Create a template", "tpl_delete": "Delete a template",
+    "vm_capture": "Save a powered-off VM as a template", "vms_list": "List VMs (scoped to the caller's org)",
+    "vm_create": "Create a VM from a size or a template", "vm_get": "Get a VM", "vm_delete": "Delete a powered-off VM",
+    "vm_power": "Power action on a VM", "vm_size": "Resize a powered-off VM", "vm_tags": "Set a VM's security tags",
+    "snap_create": "Take a snapshot", "snap_revert": "Revert to the snapshot", "snap_delete": "Remove the snapshot",
+    "edge_get": "Edge gateway and distributed firewall rules", "fw_add": "Add an edge firewall rule",
+    "nat_add": "Add a NAT rule", "dfw_add": "Add a distributed firewall rule",
+    "dfw_default": "Set the distributed firewall default action", "rule_delete": "Delete a rule",
+    "check_inbound": "Explain whether inbound traffic is delivered",
+    "check_east_west": "Explain whether VM-to-VM traffic is delivered", "tasks": "Recent platform tasks",
+    "sync_now": "Sync every cloud account now", "sync_history": "Sync history",
+    "resources": "Query the unified inventory", "resources_csv": "Export the inventory as CSV",
+    "resources_summary": "Inventory totals", "resources_history": "Change history",
+    "resources_relations": "Linked resources", "resources_orphans": "Disks and IPs whose instance is gone",
+    "resource_action": "Act on an instance in any cloud", "costs": "Estimated monthly cost and waste",
+    "policies_list": "List governance policies", "policies_add": "Add or replace a policy",
+    "policies_run": "Run a policy (dry run by default)", "policies_runs": "Policy run history",
+    "audit": "API audit trail", "openapi": "This OpenAPI document", "dashboard": "Web dashboard",
+    "metrics": "Prometheus metrics",
+}
+
+
+def _parse_doc(doc: str) -> dict[tuple[str, str], dict]:
+    """Read the route list in this module's docstring: method, path, {body}, access codes, note."""
+    out: dict[tuple[str, str], dict] = {}
+    for line in (doc or "").replace("?<same filters>", "").replace("/ or /dashboard", "/").splitlines():
+        m = _DOC_LINE.match(line)
+        if not m:
+            continue
+        method, path, rest = m.group(1), m.group(2).split("?")[0], m.group(3).strip()
+        body = ""
+        if rest.startswith("{"):
+            body, rest = rest[: rest.index("}") + 1], rest[rest.index("}") + 1:].strip()
+        access = []
+        while rest:
+            word, _, tail = rest.partition(" ")
+            if word.rstrip(",") in _ACCESS:
+                access.append(_ACCESS[word.rstrip(",")])
+                rest = tail.strip()
+            else:
+                break
+        note = rest.strip(" ()-")
+        paths = [path]
+        alt = re.search(r"\{([\w|]+\|[\w|]+)\}", path)
+        if alt:
+            paths = [path.replace(alt.group(0), a) for a in alt.group(1).split("|")]
+        for pth in paths:
+            out[(method, pth)] = {"summary": note, "body": body, "access": access}
+    return out
+
+
+def openapi_spec(routes: list, doc: str) -> dict:
+    """Build an OpenAPI 3.0 document from the route table; summaries come from the module docstring."""
+    notes = _parse_doc(doc)
+    paths: dict[str, dict] = {}
+    for method, pattern, fn, needs_auth in routes:
+        alternation = re.search(r"\(\?P<action>([\w|]+)\)", pattern)
+        variants = [pattern.replace(alternation.group(0), a) for a in alternation.group(1).split("|")] \
+            if alternation else [pattern]
+        for variant in variants:
+            if variant == r"/(?:dashboard)?":
+                variant = "/"
+            path = _PARAM.sub(lambda m: "{" + m.group(1) + "}", variant).replace("\\.", ".")
+            params = re.findall(r"\{(\w+)\}", path)
+            note = notes.get((method, path), {"summary": "", "body": "", "access": []})
+            summary = SUMMARIES.get(fn.__name__, f"{method} {path}")
+            if fn.__name__ == "resource_action":
+                summary = f"{path.rsplit('/', 1)[1].capitalize()} an instance in any cloud"
+            description = "Access: " + ("; ".join(note["access"]) or "see summary") + "."
+            if note["body"]:
+                description += f" Body: `{note['body']}`."
+            if note["summary"] and not note["summary"].startswith(method):
+                description += f" {note['summary'][0].upper()}{note['summary'][1:]}."
+            op = {
+                "summary": summary,
+                "description": description,
+                "operationId": f"{method.lower()}{re.sub(r'[^A-Za-z0-9]+', '_', path).rstrip('_')}",
+                "parameters": [{"name": p, "in": "path", "required": True, "schema": {"type": "string"}}
+                               for p in params],
+                "responses": {"200": {"description": "OK"}, "400": {"description": "Bad input"},
+                              "401": {"description": "Missing or invalid API key"},
+                              "403": {"description": "Role or org not allowed"},
+                              "404": {"description": "Not found"}, "409": {"description": "Conflict"}},
+            }
+            if method in ("POST", "PUT"):
+                op["requestBody"] = {"required": False, "content": {"application/json": {"schema": {"type": "object"}}}}
+            if not needs_auth:
+                op["security"] = []
+            paths.setdefault(path, {})[method.lower()] = op
+    return {
+        "openapi": "3.0.3",
+        "info": {"title": "Mini EvDC API", "version": __import__("evdc").__version__,
+                 "description": "Simplified enterprise virtual data center + multi-cloud integration service."},
+        "components": {"securitySchemes": {"bearer": {"type": "http", "scheme": "bearer"},
+                                           "apiKey": {"type": "apiKey", "in": "header", "name": "X-API-Key"}}},
+        "security": [{"bearer": []}, {"apiKey": []}],
+        "paths": dict(sorted(paths.items())),
+    }
 
 
 # exception -> HTTP status (first match wins, so subclasses go first)
@@ -540,6 +675,7 @@ def make_handler(app: App):
                 body = payload.encode()
             else:
                 body = json.dumps(to_dict(payload), ensure_ascii=False).encode()
+            self._status = status
             self.send_response(status)
             self.send_header("Content-Type", ctype)
             self.send_header("Content-Length", str(len(body)))
@@ -562,7 +698,7 @@ def make_handler(app: App):
             url = urlparse(self.path)
             query = {k: v[0] for k, v in parse_qs(url.query).items()}
             path_matched = False
-            for m, pattern, fn, needs_auth in routes:
+            for m, pattern, fn, needs_auth in routes:  # noqa: B007 - fn / needs_auth used after break
                 match = pattern.match(url.path)
                 if not match:
                     continue
@@ -572,6 +708,7 @@ def make_handler(app: App):
             else:
                 return self._send(405 if path_matched else 404,
                                   {"error": "method not allowed" if path_matched else "route not found"})
+            who = None
             try:
                 who = app.auth.authenticate(self._key()) if needs_auth else None
                 length = int(self.headers.get("Content-Length") or 0)
@@ -589,6 +726,12 @@ def make_handler(app: App):
                         return self._send(status, {"error": detail, "type": type(exc).__name__})
                 log.exception("unhandled error", extra={"ctx": {"path": url.path}})
                 self._send(500, {"error": "internal error"})
+            finally:
+                # audit every change and every refused request (who, what, result); reads are not logged
+                status = getattr(self, "_status", 0)
+                if method != "GET" or status in (401, 403):
+                    app.store.audit(who.name if who else None, who.role if who else None, method, url.path,
+                                    status, self.client_address[0])
 
         def do_GET(self):
             self._dispatch("GET")

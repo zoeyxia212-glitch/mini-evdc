@@ -3,7 +3,7 @@
 Real SDK equivalent: azure.identity.ClientSecretCredential +
 azure.mgmt.compute.ComputeManagementClient (virtual_machines, disks) and
 azure.mgmt.network.NetworkManagementClient (virtual_networks, public_ip_addresses).
-The SDK follows "nextLink" for you; here it is done by hand to show the pattern.
+Pagination follows "nextLink", which is treated as an opaque continuation token.
 
 Azure uses short-lived OAuth bearer tokens, so this adapter
 - refreshes the token shortly before it expires, and
@@ -12,8 +12,7 @@ Azure uses short-lived OAuth bearer tokens, so this adapter
 from __future__ import annotations
 
 import time
-from typing import Iterator
-from urllib.parse import parse_qs, urlparse
+from collections.abc import Iterator
 
 from ..models import CloudResource, ResourceStatus
 from ..retry import run_with_retry
@@ -64,11 +63,12 @@ class AzureAdapter(ProviderAdapter):
 
     def iter_raw(self, kind: str) -> Iterator[dict]:
         op, method = LIST_CALLS[kind]
-        skip = None
+        next_link = None
         while True:
             self.authenticate()  # cheap; refreshes only near expiry
-            resp = self.call(op, lambda s=skip: getattr(self.client, method)(
-                self._token, skip_token=s, top=self.page_size))
+            # the nextLink is opaque: hand it back unchanged (real skiptokens are not numbers)
+            resp = self.call(op, lambda link=next_link: getattr(self.client, method)(
+                self._token, next_link=link, top=self.page_size))
             for item in resp["value"]:
                 if kind == "instance":
                     self._load_sizes(item["location"])
@@ -76,7 +76,6 @@ class AzureAdapter(ProviderAdapter):
             next_link = resp.get("nextLink")
             if not next_link:
                 return
-            skip = int(parse_qs(urlparse(next_link).query)["$skiptoken"][0])
 
     def _load_sizes(self, location: str) -> None:
         if location in self._size_locations:

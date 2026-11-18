@@ -2,11 +2,11 @@ import threading
 import time
 import unittest
 
-from tests.helpers import FAST
 from evdc.app import App
 from evdc.errors import EvdcError, IncorrectState, NotFound, SyncInProgress
 from evdc.models import NetworkType, Quota, ResourceStatus
 from evdc.sync import SyncScheduler
+from tests.helpers import FAST
 
 ACCOUNTS = [
     {"provider": "aliyun", "account": "ali", "fake": True, "retry": FAST,
@@ -125,8 +125,8 @@ class SummaryTests(unittest.TestCase):
         s = app.store.summary()
         live = [r for r in app.store.list_resources() if r.status != ResourceStatus.DELETED]
         self.assertEqual(s["total"], len(live))
-        self.assertEqual(s["running_vcpu"], sum(r.vcpu or 0 for r in live
-                                                if r.status == ResourceStatus.RUNNING and r.resource_type == "instance"))
+        running = [r for r in live if r.status == ResourceStatus.RUNNING and r.resource_type == "instance"]
+        self.assertEqual(s["running_vcpu"], sum(r.vcpu or 0 for r in running))
         self.assertEqual(sum(s["by_type"].values()), s["total"])
         self.assertEqual(set(s["by_provider"]), {"evdc", "aliyun", "aws", "azure"})
 

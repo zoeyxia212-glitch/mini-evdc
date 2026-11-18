@@ -1,0 +1,17 @@
+{
+  "accounts": [
+    {
+      "provider": "aliyun",
+      "account": "my-aliyun",
+      "fake": false,
+      "region": "cn-hangzhou",
+      "page_size": 50,
+      "credentials": {
+        "region": "cn-hangzhou",
+        "access_key_id": "env:ALIBABA_CLOUD_ACCESS_KEY_ID",
+        "access_key_secret": "env:ALIBABA_CLOUD_ACCESS_KEY_SECRET"
+      },
+      "retry": {"max_attempts": 4, "base_delay": 1.0, "timeout": 20}
+    }
+  ]
+}

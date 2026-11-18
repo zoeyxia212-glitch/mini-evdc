@@ -54,7 +54,7 @@ class Policy:
     description: str = ""
 
     @classmethod
-    def from_dict(cls, d: dict) -> "Policy":
+    def from_dict(cls, d: dict) -> Policy:
         if not isinstance(d, dict):
             raise EvdcError("a policy must be a JSON object")
         unknown = set(d) - {"name", "resource", "filters", "actions", "description"}

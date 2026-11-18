@@ -99,7 +99,7 @@ class SyncScheduler:
                 log.warning("scheduled sync skipped", extra={"ctx": {"error": str(exc)}})
             self._stop.wait(self.interval)
 
-    def start(self) -> "SyncScheduler":
+    def start(self) -> SyncScheduler:
         self._thread.start()
         log.info("scheduler started", extra={"ctx": {"interval_s": self.interval}})
         return self

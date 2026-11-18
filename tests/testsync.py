@@ -1,11 +1,11 @@
 import unittest
 
-from tests.helpers import fast_policy, no_sleep
 from evdc.adapters.aliyun import AliyunAdapter
 from evdc.adapters.aws import AwsAdapter
 from evdc.clouds.fake import FakeAliyunEcs, FakeEc2, aliyun_throttle
 from evdc.store import Store
 from evdc.sync import SyncService
+from tests.helpers import fast_policy, no_sleep
 
 
 class SyncTests(unittest.TestCase):

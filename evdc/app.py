@@ -9,10 +9,12 @@ real SDK client wrapped to the same method names (see README).
 """
 from __future__ import annotations
 
+import importlib
 import json
 import os
 import threading
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 from .adapters import ADAPTERS, ProviderAdapter
 from .auth import AuthService
@@ -46,8 +48,11 @@ FAKE_FACTORIES: dict[str, Callable[[dict], Any]] = {
     "azure": lambda c: FakeAzure(c["tenant_id"], c["client_id"], c["client_secret"]),
 }
 
-# provider -> callable(credentials) returning a real client; empty by default
+# provider -> callable(credentials) returning a real client; overrides the built-in ones below
 CLIENT_FACTORIES: dict[str, Callable[[dict], Any]] = {}
+
+# built-in real clients (module in evdc/clouds), used when an account has "fake": false
+REAL_CLIENTS = {"aws": "awsreal", "aliyun": "aliyunreal", "azure": "azurereal"}
 
 
 class App:
@@ -86,9 +91,10 @@ class App:
                 client = FAKE_FACTORIES[provider](creds)
             elif provider in CLIENT_FACTORIES:
                 client = CLIENT_FACTORIES[provider](creds)
-            elif provider == "aws":
-                from .clouds.awsreal import factory   # needs boto3: pip install "mini-evdc[aws]"
-                client = factory(creds)
+            elif provider in REAL_CLIENTS:
+                # real SDK clients are imported only when used: pip install ".[aws]" / ".[aliyun]" / ".[azure]"
+                module = importlib.import_module(f".clouds.{REAL_CLIENTS[provider]}", __package__)
+                client = module.factory(creds)
             else:
                 raise NotImplementedError(f"no real client factory registered for {provider}")
             options = {k: v for k, v in acc.items() if k in ("page_size", "retry", "region")}

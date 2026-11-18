@@ -1,14 +1,13 @@
 import time
 import unittest
 
-from tests.helpers import fast_policy, no_sleep
 from evdc.adapters.aliyun import AliyunAdapter
 from evdc.adapters.aws import AwsAdapter
 from evdc.adapters.azure import AzureAdapter
-from evdc.clouds.fake import (FakeAliyunEcs, FakeAzure, FakeEc2, aliyun_throttle, aws_throttle,
-                              azure_throttle)
+from evdc.clouds.fake import FakeAliyunEcs, FakeAzure, FakeEc2, aliyun_throttle, aws_throttle, azure_throttle
 from evdc.errors import ApiTimeout, AuthError, TransientError
 from evdc.models import CloudResource, ResourceStatus
+from tests.helpers import fast_policy, no_sleep
 
 
 def ali(count=23, **kw):

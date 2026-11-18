@@ -16,7 +16,8 @@ from __future__ import annotations
 
 import time
 from abc import ABC, abstractmethod
-from typing import Any, Callable, Iterator, TypeVar
+from collections.abc import Callable, Iterator
+from typing import Any, TypeVar
 
 from ..errors import AuthError
 from ..logs import get_logger
@@ -25,7 +26,7 @@ from ..retry import RetryPolicy, run_with_retry
 
 T = TypeVar("T")
 
-ADAPTERS: dict[str, type["ProviderAdapter"]] = {}
+ADAPTERS: dict[str, type[ProviderAdapter]] = {}
 
 
 def register(name: str):
@@ -51,7 +52,7 @@ class ProviderAdapter(ABC):
         self.skipped = 0
 
     # -- hooks -----------------------------------------------------------
-    def authenticate(self, force: bool = False) -> None:
+    def authenticate(self, force: bool = False) -> None:  # noqa: B027 - optional hook, not abstract
         """Default: credentials are static keys, nothing to do."""
 
     @abstractmethod

@@ -6,14 +6,13 @@ relies on that shape, so a look-alike exception is enough to test the mapping.
 import os
 import unittest
 
-from tests.helpers import fast_policy, no_sleep
 from evdc.adapters.aws import AwsAdapter
 from evdc.app import App, resolve
 from evdc.clouds.awsreal import Ec2Client, translate
 from evdc.clouds.fake import FakeEc2
-from evdc.errors import (AuthError, CloudApiError, IncorrectState, ResourceNotFound, ThrottledError,
-                         TransientError)
+from evdc.errors import AuthError, CloudApiError, IncorrectState, ResourceNotFound, ThrottledError, TransientError
 from evdc.models import ResourceStatus
+from tests.helpers import fast_policy, no_sleep
 
 
 class ClientError(Exception):

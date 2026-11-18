@@ -1,9 +1,9 @@
 import unittest
 
-from tests import helpers  # noqa: F401  (quiet logs)
 from evdc.core import EvdcPlatform
 from evdc.errors import EvdcError, InvalidState, NotFound, QuotaExceeded
 from evdc.models import DistributedRule, FirewallRule, NatRule, PowerState, Quota
+from tests import helpers  # noqa: F401  (quiet logs)
 
 
 class CoreTests(unittest.TestCase):

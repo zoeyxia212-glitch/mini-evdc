@@ -1,0 +1,17 @@
+{
+  "accounts": [
+    {
+      "provider": "azure",
+      "account": "my-azure",
+      "fake": false,
+      "page_size": 50,
+      "credentials": {
+        "tenant_id": "env:AZURE_TENANT_ID",
+        "client_id": "env:AZURE_CLIENT_ID",
+        "client_secret": "env:AZURE_CLIENT_SECRET",
+        "subscription_id": "env:AZURE_SUBSCRIPTION_ID"
+      },
+      "retry": {"max_attempts": 4, "base_delay": 1.0, "timeout": 30}
+    }
+  ]
+}

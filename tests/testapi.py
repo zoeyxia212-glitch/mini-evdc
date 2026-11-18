@@ -4,9 +4,9 @@ import unittest
 import urllib.error
 import urllib.request
 
-from tests.helpers import FAST
 from evdc.api import serve
 from evdc.app import App
+from tests.helpers import FAST
 
 
 class ApiBase(unittest.TestCase):
@@ -103,6 +103,36 @@ class AuthTests(ApiBase):
         self.assertEqual(self.call("DELETE", "/users/gamma-x")[0], 204)
         self.assertEqual(self.call("GET", "/me", key=created["api_key"])[0], 401)
         self.assertEqual(self.call("DELETE", "/users/admin")[0], 400)  # cannot delete yourself
+
+
+class AuditAndDocsTests(ApiBase):
+    def test_writes_and_refusals_are_audited(self):
+        org, _, _, key, viewer = self.make_tenant("audit")
+        self.call("POST", "/orgs", {"name": "nope"}, key=key)            # 403
+        self.call("GET", "/orgs", key="evdc_wrong")                      # 401
+        self.call("GET", "/orgs")                                        # plain read: not audited
+        s, log = self.call("GET", "/audit?limit=200")
+        self.assertEqual(s, 200)
+        by = {(e["user"], e["method"], e["path"], e["status"]) for e in log}
+        self.assertIn(("admin", "POST", "/orgs", 201), by)
+        self.assertIn(("audit-admin", "POST", "/orgs", 403), by)
+        self.assertIn((None, "GET", "/orgs", 401), by)
+        self.assertNotIn(("admin", "GET", "/orgs", 200), by)
+        self.assertEqual(self.call("GET", "/audit", key=key)[0], 403)   # tenants cannot read it
+        s, mine = self.call("GET", "/audit?user=audit-admin")
+        self.assertTrue(mine and all(e["user"] == "audit-admin" for e in mine))
+
+    def test_openapi_lists_every_route(self):
+        from evdc.api import build_routes
+        s, spec = self.call("GET", "/openapi.json", key=None)
+        self.assertEqual((s, spec["openapi"]), (200, "3.0.3"))
+        self.assertIn("/vms/{vm}/power", spec["paths"])
+        self.assertIn("post", spec["paths"]["/resources/reboot"])
+        self.assertEqual(spec["paths"]["/health"]["get"]["security"], [])
+        n_ops = sum(len(v) for v in spec["paths"].values())
+        n_routes = sum(4 if "refresh|start|stop|reboot" in r[1] else 1 for r in build_routes(self.app))
+        self.assertEqual(n_ops, n_routes)
+        self.assertTrue(all(op["summary"] for ops in spec["paths"].values() for op in ops.values()))
 
 
 class PlatformApiTests(ApiBase):

@@ -20,7 +20,8 @@ import random
 import threading
 import time
 from collections import deque
-from typing import Callable
+from collections.abc import Callable
+from urllib.parse import parse_qs, urlparse
 
 from ..errors import AuthError, IncorrectState, ResourceNotFound, ThrottledError, TransientError
 
@@ -384,8 +385,9 @@ class FakeAzure:
                                        "provisioningState": "Succeeded"}}]
         self._pips = [{"id": f"{rg}/Microsoft.Network/publicIPAddresses/pip-{i}", "name": f"pip-{i}",
                        "location": "australiaeast", "tags": {},
-                       "properties": {"ipAddress": _rand_ip(rng, "20.70"), "publicIPAllocationMethod": "Static",
-                                      **({"ipConfiguration": {"id": self._vms[i]["id"] + "/nic"}} if i == 0 and count else {})}}
+                       "properties": {
+                           "ipAddress": _rand_ip(rng, "20.70"), "publicIPAllocationMethod": "Static",
+                           **({"ipConfiguration": {"id": self._vms[i]["id"] + "/nic"}} if i == 0 and count else {})}}
                       for i in range(2)]
 
     # OAuth2 client-credentials flow
@@ -402,21 +404,27 @@ class FakeAzure:
         for t in self._tokens:
             self._tokens[t] = 0
 
-    def list_vms(self, token: str, skip_token: int | None = None, top: int = 5) -> dict:
+    @staticmethod
+    def _offset(next_link: str | None) -> int:
+        if not next_link:
+            return 0
+        return int(parse_qs(urlparse(next_link).query)["$skiptoken"][0])
+
+    def list_vms(self, token: str, next_link: str | None = None, top: int = 5) -> dict:
         self.faults.before_call()
         if self._tokens.get(token, 0) < time.time():
             raise AuthError("The access token expiry UTC time is earlier than current UTC time.",
                             "azure", "ExpiredAuthenticationToken")
-        start = skip_token or 0
+        start = self._offset(next_link)
         resp = {"value": self._vms[start:start + top]}
         if start + top < len(self._vms):
             resp["nextLink"] = (f"https://management.azure.com/subscriptions/{self.subscription_id}/providers/"
                                 f"Microsoft.Compute/virtualMachines?api-version=2023-09-01&$skiptoken={start + top}")
         return resp
 
-    def _list(self, token: str, items: list, kind: str, skip_token: int | None, top: int) -> dict:
+    def _list(self, token: str, items: list, kind: str, next_link: str | None, top: int) -> dict:
         self._token_ok(token)
-        start = skip_token or 0
+        start = self._offset(next_link)
         resp = {"value": items[start:start + top]}
         if start + top < len(items):
             resp["nextLink"] = (f"https://management.azure.com/subscriptions/{self.subscription_id}/providers/"
@@ -429,14 +437,14 @@ class FakeAzure:
             raise AuthError("The access token expiry UTC time is earlier than current UTC time.",
                             "azure", "ExpiredAuthenticationToken")
 
-    def list_disks(self, token: str, skip_token: int | None = None, top: int = 5) -> dict:
-        return self._list(token, self._disks, "Microsoft.Compute/disks", skip_token, top)
+    def list_disks(self, token: str, next_link: str | None = None, top: int = 5) -> dict:
+        return self._list(token, self._disks, "Microsoft.Compute/disks", next_link, top)
 
-    def list_vnets(self, token: str, skip_token: int | None = None, top: int = 5) -> dict:
-        return self._list(token, self._vnets, "Microsoft.Network/virtualNetworks", skip_token, top)
+    def list_vnets(self, token: str, next_link: str | None = None, top: int = 5) -> dict:
+        return self._list(token, self._vnets, "Microsoft.Network/virtualNetworks", next_link, top)
 
-    def list_public_ips(self, token: str, skip_token: int | None = None, top: int = 5) -> dict:
-        return self._list(token, self._pips, "Microsoft.Network/publicIPAddresses", skip_token, top)
+    def list_public_ips(self, token: str, next_link: str | None = None, top: int = 5) -> dict:
+        return self._list(token, self._pips, "Microsoft.Network/publicIPAddresses", next_link, top)
 
     def get_vm(self, token: str, vm_id: str) -> dict:
         """GET .../virtualMachines/{name}?$expand=instanceView"""
@@ -472,7 +480,8 @@ class FakeAzure:
 
     def restart(self, token: str, vm_id: str) -> dict:
         vm = self.get_vm(token, vm_id)
-        power = next(s["code"] for s in vm["properties"]["instanceView"]["statuses"] if s["code"].startswith("PowerState/"))
+        statuses = vm["properties"]["instanceView"]["statuses"]
+        power = next(s["code"] for s in statuses if s["code"].startswith("PowerState/"))
         if power != "PowerState/running":
             raise IncorrectState("Operation 'restart' is not allowed since the VM is not running.",
                                  "azure", "OperationNotAllowed")

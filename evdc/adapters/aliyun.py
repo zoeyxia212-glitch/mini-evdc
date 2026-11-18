@@ -9,7 +9,7 @@ records twice, e.g. {"Disks": {"Disk": [...]}}.
 from __future__ import annotations
 
 import json
-from typing import Iterator
+from collections.abc import Iterator
 
 from ..errors import ResourceNotFound
 from ..models import CloudResource, ResourceStatus
