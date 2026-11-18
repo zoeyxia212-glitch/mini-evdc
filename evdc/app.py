@@ -15,6 +15,7 @@ import threading
 from typing import Any, Callable
 
 from .adapters import ADAPTERS, ProviderAdapter
+from .auth import AuthService
 from .clouds.fake import FakeAliyunEcs, FakeAzure, FakeEc2
 from .core import EvdcPlatform
 from .errors import SyncInProgress
@@ -47,12 +48,22 @@ CLIENT_FACTORIES: dict[str, Callable[[dict], Any]] = {}
 
 class App:
     def __init__(self, db_path: str = ":memory:"):
-        self.platform = EvdcPlatform()
         self.store = Store(db_path)
+        self.platform = EvdcPlatform(on_change=self.store.save_platform)
+        saved = self.store.load_platform()
+        if saved:
+            self.platform.load_state(saved)   # survive restarts
+        self.auth = AuthService(self.store)
         self.adapters: list[ProviderAdapter] = []
         self.scheduler: SyncScheduler | None = None
         self._sync_lock = threading.Lock()
         self.add_account("evdc", "local", self.platform)
+
+    def bootstrap_admin(self, key: str | None = None) -> str | None:
+        """Create the first system admin if there is none. Returns the new key, or None if one exists."""
+        if any(u["role"] == "system_admin" for u in self.store.list_users()):
+            return None
+        return self.auth.create_user("admin", "system_admin", None, key=key or os.environ.get("EVDC_ADMIN_KEY"))
 
     def add_account(self, provider: str, account: str, client: Any, **options) -> ProviderAdapter:
         cls = ADAPTERS[provider]
@@ -92,6 +103,11 @@ class App:
     @property
     def manager(self) -> ResourceManager:
         return ResourceManager(self.store, self.adapters)
+
+    def close(self) -> None:
+        if self.scheduler:
+            self.scheduler.stop()
+        self.store.close()
 
     def start_scheduler(self, interval: float) -> SyncScheduler:
         self.scheduler = SyncScheduler(self.sync, interval).start()

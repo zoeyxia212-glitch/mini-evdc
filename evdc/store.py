@@ -1,4 +1,12 @@
-"""SQLite persistence for the unified resource inventory and sync history."""
+"""SQLite persistence.
+
+Tables
+- resources      unified multi-cloud inventory (one row per uid)
+- resource_events change history: created / updated (with field diff) / deleted / action
+- sync_runs      one row per account per sync
+- platform_state JSON snapshot of the Mini EvDC platform (orgs, VDCs, VMs ...)
+- users          API users: hashed key, role, org scope
+"""
 from __future__ import annotations
 
 import json
@@ -9,22 +17,34 @@ from .models import CloudResource, ResourceStatus, now
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS resources (
-    uid         TEXT PRIMARY KEY,
-    provider    TEXT NOT NULL,
-    account     TEXT NOT NULL,
-    region      TEXT NOT NULL,
-    native_id   TEXT NOT NULL,
-    name        TEXT,
-    status      TEXT NOT NULL,
-    vcpu        INTEGER,
-    memory_gb   REAL,
-    private_ip  TEXT,
-    public_ip   TEXT,
-    tags        TEXT,
-    resource_type TEXT,
-    synced_at   TEXT
+    uid           TEXT PRIMARY KEY,
+    provider      TEXT NOT NULL,
+    account       TEXT NOT NULL,
+    region        TEXT NOT NULL,
+    native_id     TEXT NOT NULL,
+    resource_type TEXT NOT NULL,
+    name          TEXT,
+    status        TEXT NOT NULL,
+    vcpu          INTEGER,
+    memory_gb     REAL,
+    private_ip    TEXT,
+    public_ip     TEXT,
+    size_gb       REAL,
+    tags          TEXT,
+    attributes    TEXT,
+    synced_at     TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_res_provider ON resources(provider, account);
+CREATE INDEX IF NOT EXISTS idx_res_type ON resources(resource_type, status);
+
+CREATE TABLE IF NOT EXISTS resource_events (
+    id      INTEGER PRIMARY KEY AUTOINCREMENT,
+    uid     TEXT NOT NULL,
+    ts      TEXT NOT NULL,
+    kind    TEXT NOT NULL,      -- created | updated | deleted | action
+    detail  TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_events_uid ON resource_events(uid);
 
 CREATE TABLE IF NOT EXISTS sync_runs (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -33,41 +53,69 @@ CREATE TABLE IF NOT EXISTS sync_runs (
     status      TEXT, created INTEGER, updated INTEGER, deleted INTEGER,
     error       TEXT
 );
+
+CREATE TABLE IF NOT EXISTS platform_state (
+    id         INTEGER PRIMARY KEY CHECK (id = 1),
+    saved_at   TEXT,
+    state      TEXT
+);
+
+CREATE TABLE IF NOT EXISTS users (
+    name      TEXT PRIMARY KEY,
+    key_hash  TEXT UNIQUE NOT NULL,
+    role      TEXT NOT NULL,
+    org_id    TEXT,
+    created_at TEXT
+);
 """
+
+# columns compared when deciding created / updated / unchanged
+_FIELDS = ("provider", "account", "region", "native_id", "resource_type", "name", "status", "vcpu",
+           "memory_gb", "private_ip", "public_ip", "size_gb", "tags", "attributes")
+
+
+def _row_values(r: CloudResource) -> dict:
+    return {"provider": r.provider, "account": r.account, "region": r.region, "native_id": r.native_id,
+            "resource_type": r.resource_type, "name": r.name, "status": r.status.value, "vcpu": r.vcpu,
+            "memory_gb": r.memory_gb, "private_ip": r.private_ip, "public_ip": r.public_ip,
+            "size_gb": r.size_gb, "tags": json.dumps(r.tags, sort_keys=True),
+            "attributes": json.dumps(r.attributes, sort_keys=True, default=str)}
 
 
 class Store:
     def __init__(self, path: str = ":memory:"):
         self._conn = sqlite3.connect(path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         with self._lock:
             self._conn.executescript(SCHEMA)
 
+    def close(self) -> None:
+        with self._lock:
+            self._conn.close()
+
     # -- resources ---------------------------------------------------------
     def upsert(self, r: CloudResource) -> str:
-        """Insert or update. Returns 'created', 'updated' or 'unchanged'."""
+        """Insert or update. Returns 'created', 'updated' or 'unchanged' and logs an event."""
+        new = _row_values(r)
         with self._lock:
             row = self._conn.execute("SELECT * FROM resources WHERE uid=?", (r.uid,)).fetchone()
-            values = (r.provider, r.account, r.region, r.native_id, r.name, r.status.value,
-                      r.vcpu, r.memory_gb, r.private_ip, r.public_ip,
-                      json.dumps(r.tags, sort_keys=True), r.resource_type, r.synced_at)
+            cols = list(new) + ["synced_at"]
             if row is None:
                 self._conn.execute(
-                    "INSERT INTO resources (provider, account, region, native_id, name, status, vcpu,"
-                    " memory_gb, private_ip, public_ip, tags, resource_type, synced_at, uid)"
-                    " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (*values, r.uid))
-                self._conn.commit()
-                return "created"
-            old = (row["provider"], row["account"], row["region"], row["native_id"], row["name"],
-                   row["status"], row["vcpu"], row["memory_gb"], row["private_ip"], row["public_ip"],
-                   row["tags"], row["resource_type"])
-            self._conn.execute(
-                "UPDATE resources SET provider=?, account=?, region=?, native_id=?, name=?, status=?,"
-                " vcpu=?, memory_gb=?, private_ip=?, public_ip=?, tags=?, resource_type=?, synced_at=?"
-                " WHERE uid=?", (*values, r.uid))
+                    f"INSERT INTO resources ({', '.join(cols)}, uid) VALUES ({', '.join('?' * (len(cols) + 1))})",
+                    (*new.values(), r.synced_at, r.uid))
+                self._event(r.uid, "created", {"status": new["status"], "type": r.resource_type})
+                outcome = "created"
+            else:
+                diff = {k: [row[k], v] for k, v in new.items() if row[k] != v}
+                self._conn.execute(f"UPDATE resources SET {', '.join(c + '=?' for c in cols)} WHERE uid=?",
+                                   (*new.values(), r.synced_at, r.uid))
+                if diff:
+                    self._event(r.uid, "updated", diff)
+                outcome = "updated" if diff else "unchanged"
             self._conn.commit()
-            return "unchanged" if old == values[:-1] else "updated"
+            return outcome
 
     def mark_missing_deleted(self, provider: str, account: str, seen_uids: set[str]) -> int:
         """Anything we had for this account but did not see this run is gone."""
@@ -79,49 +127,60 @@ class Store:
             for uid in gone:
                 self._conn.execute("UPDATE resources SET status=?, synced_at=? WHERE uid=?",
                                    (ResourceStatus.DELETED.value, now(), uid))
+                self._event(uid, "deleted", {})
             self._conn.commit()
             return len(gone)
-
-    def list_resources(self, provider: str | None = None, status: str | None = None) -> list[CloudResource]:
-        sql, args = "SELECT * FROM resources WHERE 1=1", []
-        if provider:
-            sql += " AND provider=?"
-            args.append(provider)
-        if status:
-            sql += " AND status=?"
-            args.append(status)
-        sql += " ORDER BY provider, account, name"
-        with self._lock:
-            rows = self._conn.execute(sql, args).fetchall()
-        return [self._row_to_resource(r) for r in rows]
 
     def get(self, uid: str) -> CloudResource | None:
         with self._lock:
             row = self._conn.execute("SELECT * FROM resources WHERE uid=?", (uid,)).fetchone()
         return self._row_to_resource(row) if row else None
 
-    def set_status(self, uid: str, status: ResourceStatus) -> None:
+    def set_status(self, uid: str, status: ResourceStatus, action: str | None = None) -> None:
         with self._lock:
+            old = self._conn.execute("SELECT status FROM resources WHERE uid=?", (uid,)).fetchone()
             self._conn.execute("UPDATE resources SET status=?, synced_at=? WHERE uid=?",
                                (status.value, now(), uid))
+            if action:
+                self._event(uid, "action", {"action": action, "status": [old["status"] if old else None,
+                                                                         status.value]})
             self._conn.commit()
 
+    def list_resources(self, provider: str | None = None, status: str | None = None,
+                       resource_type: str | None = None, account: str | None = None) -> list[CloudResource]:
+        sql, args = "SELECT * FROM resources WHERE 1=1", []
+        for col, val in (("provider", provider), ("status", status), ("resource_type", resource_type),
+                         ("account", account)):
+            if val:
+                sql += f" AND {col}=?"
+                args.append(val)
+        sql += " ORDER BY provider, account, resource_type, name"
+        with self._lock:
+            rows = self._conn.execute(sql, args).fetchall()
+        return [self._row_to_resource(r) for r in rows]
+
     def summary(self) -> dict:
-        """Counts per provider/status plus capacity of running instances (deleted excluded)."""
+        """Counts per provider / type / status, plus capacity of running instances (deleted excluded)."""
         with self._lock:
             rows = self._conn.execute(
-                "SELECT provider, status, COUNT(*) AS n, SUM(COALESCE(vcpu,0)) AS cpu,"
-                " SUM(COALESCE(memory_gb,0)) AS mem FROM resources WHERE status != ?"
-                " GROUP BY provider, status", (ResourceStatus.DELETED.value,)).fetchall()
-        out: dict = {"total": 0, "running_vcpu": 0, "running_memory_gb": 0.0, "by_provider": {}}
+                "SELECT provider, resource_type, status, COUNT(*) AS n, SUM(COALESCE(vcpu,0)) AS cpu,"
+                " SUM(COALESCE(memory_gb,0)) AS mem, SUM(COALESCE(size_gb,0)) AS disk"
+                " FROM resources WHERE status != ? GROUP BY provider, resource_type, status",
+                (ResourceStatus.DELETED.value,)).fetchall()
+        out: dict = {"total": 0, "running_vcpu": 0, "running_memory_gb": 0.0, "disk_gb": 0.0,
+                     "by_type": {}, "by_provider": {}}
         for r in rows:
             prov = out["by_provider"].setdefault(r["provider"], {"total": 0})
-            prov[r["status"]] = r["n"]
+            kind = prov.setdefault(r["resource_type"], {})
+            kind[r["status"]] = r["n"]
             prov["total"] += r["n"]
             out["total"] += r["n"]
-            if r["status"] == ResourceStatus.RUNNING.value:
+            out["by_type"][r["resource_type"]] = out["by_type"].get(r["resource_type"], 0) + r["n"]
+            if r["resource_type"] == "instance" and r["status"] == ResourceStatus.RUNNING.value:
                 out["running_vcpu"] += r["cpu"]
                 out["running_memory_gb"] = round(out["running_memory_gb"] + r["mem"], 2)
+            if r["resource_type"] == "disk":
+                out["disk_gb"] = round(out["disk_gb"] + r["disk"], 2)
         return out
 
     @staticmethod
@@ -130,8 +189,25 @@ class Store:
             provider=row["provider"], account=row["account"], region=row["region"],
             native_id=row["native_id"], name=row["name"], status=ResourceStatus(row["status"]),
             vcpu=row["vcpu"], memory_gb=row["memory_gb"], private_ip=row["private_ip"],
-            public_ip=row["public_ip"], tags=json.loads(row["tags"] or "{}"),
-            resource_type=row["resource_type"], synced_at=row["synced_at"])
+            public_ip=row["public_ip"], size_gb=row["size_gb"], tags=json.loads(row["tags"] or "{}"),
+            resource_type=row["resource_type"], attributes=json.loads(row["attributes"] or "{}"),
+            synced_at=row["synced_at"])
+
+    # -- change history ------------------------------------------------------
+    def _event(self, uid: str, kind: str, detail: dict) -> None:
+        self._conn.execute("INSERT INTO resource_events (uid, ts, kind, detail) VALUES (?,?,?,?)",
+                           (uid, now(), kind, json.dumps(detail, default=str)))
+
+    def history(self, uid: str | None = None, limit: int = 100) -> list[dict]:
+        sql, args = "SELECT * FROM resource_events", []
+        if uid:
+            sql += " WHERE uid=?"
+            args.append(uid)
+        sql += " ORDER BY id DESC LIMIT ?"
+        args.append(limit)
+        with self._lock:
+            rows = self._conn.execute(sql, args).fetchall()
+        return [{**dict(r), "detail": json.loads(r["detail"] or "{}")} for r in rows]
 
     # -- sync history ------------------------------------------------------
     def record_sync(self, **run) -> None:
@@ -145,3 +221,42 @@ class Store:
         with self._lock:
             rows = self._conn.execute("SELECT * FROM sync_runs ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
         return [dict(r) for r in rows]
+
+    # -- platform state ------------------------------------------------------
+    def save_platform(self, state: dict) -> None:
+        with self._lock:
+            self._conn.execute("INSERT INTO platform_state (id, saved_at, state) VALUES (1, ?, ?)"
+                               " ON CONFLICT(id) DO UPDATE SET saved_at=excluded.saved_at, state=excluded.state",
+                               (now(), json.dumps(state)))
+            self._conn.commit()
+
+    def load_platform(self) -> dict | None:
+        with self._lock:
+            row = self._conn.execute("SELECT state FROM platform_state WHERE id=1").fetchone()
+        return json.loads(row["state"]) if row else None
+
+    # -- users -------------------------------------------------------------------
+    def add_user(self, name: str, key_hash: str, role: str, org_id: str | None) -> None:
+        with self._lock:
+            self._conn.execute("INSERT INTO users (name, key_hash, role, org_id, created_at) VALUES (?,?,?,?,?)",
+                               (name, key_hash, role, org_id, now()))
+            self._conn.commit()
+
+    def user_by_hash(self, key_hash: str) -> dict | None:
+        with self._lock:
+            row = self._conn.execute("SELECT name, role, org_id FROM users WHERE key_hash=?", (key_hash,)).fetchone()
+        return dict(row) if row else None
+
+    def list_users(self, org_id: str | None = None) -> list[dict]:
+        sql, args = "SELECT name, role, org_id, created_at FROM users", []
+        if org_id:
+            sql += " WHERE org_id=?"
+            args.append(org_id)
+        with self._lock:
+            return [dict(r) for r in self._conn.execute(sql + " ORDER BY name", args).fetchall()]
+
+    def delete_user(self, name: str) -> bool:
+        with self._lock:
+            cur = self._conn.execute("DELETE FROM users WHERE name=?", (name,))
+            self._conn.commit()
+            return cur.rowcount > 0

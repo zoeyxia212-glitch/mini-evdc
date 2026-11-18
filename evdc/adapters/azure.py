@@ -1,10 +1,11 @@
-"""Azure Compute adapter.
+"""Azure adapter.
 
 Real SDK equivalent: azure.identity.ClientSecretCredential +
-azure.mgmt.compute.ComputeManagementClient.virtual_machines.list_all(),
-which follows "nextLink" for you; here we do it by hand to show the pattern.
+azure.mgmt.compute.ComputeManagementClient (virtual_machines, disks) and
+azure.mgmt.network.NetworkManagementClient (virtual_networks, public_ip_addresses).
+The SDK follows "nextLink" for you; here it is done by hand to show the pattern.
 
-Azure uses short-lived OAuth bearer tokens, so this adapter:
+Azure uses short-lived OAuth bearer tokens, so this adapter
 - refreshes the token shortly before it expires, and
 - if a call still fails with an expired token, re-authenticates once.
 """
@@ -26,12 +27,22 @@ POWER = {
     "stopping": ResourceStatus.STOPPING,
     "deallocating": ResourceStatus.STOPPING,
 }
+DISK_STATE = {"Attached": ResourceStatus.IN_USE, "Reserved": ResourceStatus.IN_USE,
+              "Unattached": ResourceStatus.AVAILABLE}
 REFRESH_MARGIN_S = 60
+
+LIST_CALLS = {
+    "instance": ("ListVirtualMachines", "list_vms"),
+    "disk": ("ListDisks", "list_disks"),
+    "vpc": ("ListVirtualNetworks", "list_vnets"),
+    "eip": ("ListPublicIPAddresses", "list_public_ips"),
+}
 
 
 @register("azure")
 class AzureAdapter(ProviderAdapter):
     supports_reauth = True
+    resource_types = ("instance", "disk", "vpc", "eip")
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -43,7 +54,7 @@ class AzureAdapter(ProviderAdapter):
     def authenticate(self, force: bool = False) -> None:
         if not force and self._token and time.time() < self._expires_at - REFRESH_MARGIN_S:
             return
-        # token request itself uses retry, but not the re-auth path (avoid recursion)
+        # the token request itself uses retry, but not the re-auth path (avoids recursion)
         resp = run_with_retry(self.client.get_token, self.policy, op="GetToken",
                               ctx={"provider": self.provider, "account": self.account}, sleep=self._sleep)
         self._token = resp["access_token"]
@@ -51,15 +62,17 @@ class AzureAdapter(ProviderAdapter):
         self.log.info("token acquired", extra={"ctx": {"provider": self.provider, "account": self.account,
                                                        "expires_in": resp["expires_in"]}})
 
-    def iter_raw(self) -> Iterator[dict]:
+    def iter_raw(self, kind: str) -> Iterator[dict]:
+        op, method = LIST_CALLS[kind]
         skip = None
         while True:
             self.authenticate()  # cheap; refreshes only near expiry
-            resp = self.call("ListVirtualMachines",
-                             lambda s=skip: self.client.list_vms(self._token, skip_token=s, top=self.page_size))
-            for vm in resp["value"]:
-                self._load_sizes(vm["location"])
-                yield vm
+            resp = self.call(op, lambda s=skip: getattr(self.client, method)(
+                self._token, skip_token=s, top=self.page_size))
+            for item in resp["value"]:
+                if kind == "instance":
+                    self._load_sizes(item["location"])
+                yield item
             next_link = resp.get("nextLink")
             if not next_link:
                 return
@@ -73,18 +86,11 @@ class AzureAdapter(ProviderAdapter):
             self._sizes[(location, s["name"])] = (s["numberOfCores"], s["memoryInMB"])
         self._size_locations.add(location)
 
-    def start(self, native_id: str) -> ResourceStatus:
-        self.authenticate()
-        self.call("StartVM", lambda: self.client.start(self._token, native_id))
-        return ResourceStatus.PENDING
+    # -- mapping ------------------------------------------------------------
+    def normalize(self, kind: str, raw: dict) -> CloudResource:
+        return getattr(self, f"_normalize_{kind}")(raw)
 
-    def stop(self, native_id: str) -> ResourceStatus:
-        """Azure 'stop' still bills compute; deallocate is what actually stops charges."""
-        self.authenticate()
-        self.call("DeallocateVM", lambda: self.client.deallocate(self._token, native_id))
-        return ResourceStatus.STOPPING
-
-    def normalize(self, raw: dict) -> CloudResource:
+    def _normalize_instance(self, raw: dict) -> CloudResource:
         props = raw["properties"]
         size = props["hardwareProfile"]["vmSize"]
         cores, mem_mb = self._sizes.get((raw["location"], size), (None, None))
@@ -96,11 +102,54 @@ class AzureAdapter(ProviderAdapter):
             ipcfgs = nics[0].get("properties", {}).get("ipConfigurations", [])
             if ipcfgs:
                 private_ip = ipcfgs[0]["properties"].get("privateIPAddress")
-        return CloudResource(
-            provider=self.provider, account=self.account, region=raw["location"],
-            native_id=raw["id"], name=raw["name"],
-            status=POWER.get(power, ResourceStatus.UNKNOWN),
-            vcpu=cores, memory_gb=round(mem_mb / 1024, 2) if mem_mb else None,
-            private_ip=private_ip, public_ip=None,
-            tags={**raw.get("tags", {}), "vm_size": size},
-        )
+        return self.resource(
+            "instance", raw["id"], raw["name"], POWER.get(power, ResourceStatus.UNKNOWN), raw["location"],
+            vcpu=cores, memory_gb=round(mem_mb / 1024, 2) if mem_mb else None, private_ip=private_ip,
+            tags=dict(raw.get("tags", {})), attributes={"vm_size": size, "power_state": power})
+
+    def _normalize_disk(self, raw: dict) -> CloudResource:
+        props = raw["properties"]
+        return self.resource(
+            "disk", raw["id"], raw["name"], DISK_STATE.get(props.get("diskState"), ResourceStatus.UNKNOWN),
+            raw["location"], size_gb=float(props["diskSizeGB"]), tags=dict(raw.get("tags", {})),
+            attributes={"category": raw.get("sku", {}).get("name"), "attached_to": raw.get("managedBy")})
+
+    def _normalize_vpc(self, raw: dict) -> CloudResource:
+        props = raw["properties"]
+        prefixes = props.get("addressSpace", {}).get("addressPrefixes", [])
+        return self.resource(
+            "vpc", raw["id"], raw["name"],
+            ResourceStatus.AVAILABLE if props.get("provisioningState") == "Succeeded" else ResourceStatus.PENDING,
+            raw["location"], tags=dict(raw.get("tags", {})),
+            attributes={"cidr": prefixes[0] if prefixes else None, "address_prefixes": prefixes})
+
+    def _normalize_eip(self, raw: dict) -> CloudResource:
+        props = raw["properties"]
+        attached = props.get("ipConfiguration", {}).get("id")
+        return self.resource(
+            "eip", raw["id"], raw["name"], ResourceStatus.IN_USE if attached else ResourceStatus.AVAILABLE,
+            raw["location"], public_ip=props.get("ipAddress"), tags=dict(raw.get("tags", {})),
+            attributes={"allocation": props.get("publicIPAllocationMethod"), "attached_to": attached})
+
+    # -- live query & lifecycle ------------------------------------------------
+    def get_instance(self, native_id: str) -> CloudResource:
+        self.authenticate()
+        raw = self.call("GetVirtualMachine", lambda: self.client.get_vm(self._token, native_id))
+        self._load_sizes(raw["location"])
+        return self._normalize_instance(raw)
+
+    def start(self, native_id: str) -> ResourceStatus:
+        self.authenticate()
+        self.call("StartVM", lambda: self.client.start(self._token, native_id))
+        return ResourceStatus.PENDING
+
+    def stop(self, native_id: str) -> ResourceStatus:
+        """Azure 'stop' still bills compute; deallocate is what actually stops charges."""
+        self.authenticate()
+        self.call("DeallocateVM", lambda: self.client.deallocate(self._token, native_id))
+        return ResourceStatus.STOPPING
+
+    def reboot(self, native_id: str) -> ResourceStatus:
+        self.authenticate()
+        self.call("RestartVM", lambda: self.client.restart(self._token, native_id))
+        return ResourceStatus.PENDING

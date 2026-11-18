@@ -39,6 +39,7 @@ def first(app: App, provider: str, status: ResourceStatus):
 class ManagerTests(unittest.TestCase):
     def setUp(self):
         self.app = make_app()
+        self.addCleanup(self.app.close)
         self.clients = {a.provider: a.client for a in self.app.adapters}
 
     def test_start_and_stop_on_every_cloud(self):
@@ -84,6 +85,33 @@ class ManagerTests(unittest.TestCase):
         with self.assertRaises(EvdcError):
             self.app.manager.start(res.uid)
 
+    def test_refresh_reads_live_state(self):
+        res = first(self.app, "aliyun", ResourceStatus.STOPPED)
+        self.app.manager.start(res.uid)
+        self.clients["aliyun"].settle()
+        self.assertEqual(self.app.manager.refresh(res.uid).status, ResourceStatus.RUNNING)
+        kinds = [e["kind"] for e in self.app.store.history(res.uid)]
+        self.assertEqual(kinds, ["updated", "action", "created"])
+
+    def test_refresh_marks_vanished_instance_deleted(self):
+        res = first(self.app, "aliyun", ResourceStatus.RUNNING)
+        self.clients["aliyun"].remove(res.native_id)
+        self.assertEqual(self.app.manager.refresh(res.uid).status, ResourceStatus.DELETED)
+
+    def test_reboot_only_when_running(self):
+        for provider in ("aliyun", "aws", "azure", "evdc"):
+            with self.subTest(provider=provider):
+                stopped = first(self.app, provider, ResourceStatus.STOPPED)
+                with self.assertRaises(EvdcError):
+                    self.app.manager.reboot(stopped.uid)
+        running = first(self.app, "azure", ResourceStatus.RUNNING)
+        self.assertTrue(self.app.manager.reboot(running.uid).changed)
+
+    def test_actions_only_on_instances(self):
+        disk = self.app.store.list_resources(provider="aws", resource_type="disk")[0]
+        with self.assertRaises(EvdcError):
+            self.app.manager.start(disk.uid)
+
     def test_azure_action_reauths_on_expired_token(self):
         res = first(self.app, "azure", ResourceStatus.STOPPED)
         self.clients["azure"].expire_all_tokens()
@@ -93,10 +121,13 @@ class ManagerTests(unittest.TestCase):
 class SummaryTests(unittest.TestCase):
     def test_summary_matches_inventory(self):
         app = make_app()
+        self.addCleanup(app.close)
         s = app.store.summary()
         live = [r for r in app.store.list_resources() if r.status != ResourceStatus.DELETED]
         self.assertEqual(s["total"], len(live))
-        self.assertEqual(s["running_vcpu"], sum(r.vcpu or 0 for r in live if r.status == ResourceStatus.RUNNING))
+        self.assertEqual(s["running_vcpu"], sum(r.vcpu or 0 for r in live
+                                                if r.status == ResourceStatus.RUNNING and r.resource_type == "instance"))
+        self.assertEqual(sum(s["by_type"].values()), s["total"])
         self.assertEqual(set(s["by_provider"]), {"evdc", "aliyun", "aws", "azure"})
 
 
@@ -121,6 +152,7 @@ class SchedulerTests(unittest.TestCase):
 
     def test_overlapping_sync_refused(self):
         app = make_app()
+        self.addCleanup(app.close)
         aliyun = next(a for a in app.adapters if a.provider == "aliyun")
         aliyun.client.faults.latency = 0.3
         t = threading.Thread(target=app.sync)

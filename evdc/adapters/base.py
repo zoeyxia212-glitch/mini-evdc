@@ -1,14 +1,16 @@
 """Adapter pattern for cloud providers.
 
-Each provider returns instances in its own format. An adapter does three jobs:
+Each provider returns resources in its own format. An adapter does:
 
-1. authenticate()  - get / refresh credentials (AK/SK, OAuth token, ...)
-2. iter_raw()      - walk every page of the provider's list API
-                     (page numbers, NextToken, nextLink ... all differ)
-3. normalize(raw)  - map one raw record into the unified CloudResource
+1. authenticate()          get / refresh credentials (AK/SK, OAuth token, ...)
+2. iter_raw(kind)          walk every page of the provider's list API for one
+                           resource type (page numbers, NextToken, nextLink ...)
+3. normalize(kind, raw)    map one raw record into the unified CloudResource
+4. get_instance(id)        live status query for one instance
+5. start / stop / reboot   lifecycle actions
 
-The sync engine only talks to this interface, so adding a new provider means
-writing one new subclass and registering it; nothing else changes.
+The sync engine and the manager only talk to this interface, so adding a new
+provider means writing one new subclass and registering it.
 """
 from __future__ import annotations
 
@@ -38,6 +40,7 @@ def register(name: str):
 class ProviderAdapter(ABC):
     provider: str = "base"
     supports_reauth: bool = False
+    resource_types: tuple[str, ...] = ("instance",)
 
     def __init__(self, account: str, client: Any, policy: RetryPolicy | None = None, page_size: int = 10):
         self.account = account
@@ -52,22 +55,26 @@ class ProviderAdapter(ABC):
         """Default: credentials are static keys, nothing to do."""
 
     @abstractmethod
-    def iter_raw(self) -> Iterator[dict]:
+    def iter_raw(self, kind: str) -> Iterator[dict]:
         ...
 
     @abstractmethod
-    def normalize(self, raw: dict) -> CloudResource:
+    def normalize(self, kind: str, raw: dict) -> CloudResource:
         ...
 
-    # -- lifecycle actions (unified management) ---------------------------
-    # Return the status the instance moves to right away (usually a
-    # transitional one such as PENDING / STOPPING); the next sync records
-    # the final state. Adapters that cannot do this keep the default.
+    # live query + lifecycle; adapters that cannot do these keep the defaults
+    # (the API turns NotImplementedError into HTTP 501)
+    def get_instance(self, native_id: str) -> CloudResource:
+        raise NotImplementedError(f"{self.provider} adapter does not support live status queries")
+
     def start(self, native_id: str) -> ResourceStatus:
         raise NotImplementedError(f"{self.provider} adapter does not support start")
 
     def stop(self, native_id: str) -> ResourceStatus:
         raise NotImplementedError(f"{self.provider} adapter does not support stop")
+
+    def reboot(self, native_id: str) -> ResourceStatus:
+        raise NotImplementedError(f"{self.provider} adapter does not support reboot")
 
     # -- shared machinery -------------------------------------------------
     def call(self, op: str, fn: Callable[[], T]) -> T:
@@ -85,13 +92,20 @@ class ProviderAdapter(ABC):
     # tests swap this out so backoff does not actually wait
     _sleep: Callable[[float], None] = staticmethod(time.sleep)
 
-    def list_resources(self) -> Iterator[CloudResource]:
+    def list_resources(self, kinds: tuple[str, ...] | None = None) -> Iterator[CloudResource]:
         self.authenticate()
-        for raw in self.iter_raw():
-            try:
-                yield self.normalize(raw)
-            except (KeyError, TypeError, ValueError) as exc:
-                # one malformed record must not kill the whole sync
-                self.skipped += 1
-                self.log.warning("skipped malformed record", extra={"ctx": {
-                    "provider": self.provider, "account": self.account, "error": repr(exc)}})
+        for kind in kinds or self.resource_types:
+            for raw in self.iter_raw(kind):
+                try:
+                    yield self.normalize(kind, raw)
+                except (KeyError, TypeError, ValueError, IndexError) as exc:
+                    # one malformed record must not kill the whole sync
+                    self.skipped += 1
+                    self.log.warning("skipped malformed record", extra={"ctx": {
+                        "provider": self.provider, "account": self.account, "type": kind, "error": repr(exc)}})
+
+    def resource(self, kind: str, native_id: str, name: str, status: ResourceStatus, region: str,
+                 **fields) -> CloudResource:
+        """Small helper so every adapter fills provider/account the same way."""
+        return CloudResource(provider=self.provider, account=self.account, region=region, native_id=native_id,
+                             name=name or native_id, status=status, resource_type=kind, **fields)

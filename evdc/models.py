@@ -96,7 +96,21 @@ class VM:
     id: str = field(default_factory=lambda: new_id("vm"))
     power_state: PowerState = PowerState.POWERED_OFF
     snapshots: list[Snapshot] = field(default_factory=list)
+    tags: list[str] = field(default_factory=list)   # security tags, used by the distributed firewall
+    template_id: str | None = None
     created_at: str = field(default_factory=now)
+
+
+@dataclass
+class Template:
+    """Catalog item: a VM image + default size, like a vApp template in EvDC."""
+    org_id: str
+    name: str
+    os: str
+    vcpu: int
+    memory_gb: int
+    disk_gb: int
+    id: str = field(default_factory=lambda: new_id("tpl"))
 
 
 @dataclass
@@ -108,6 +122,20 @@ class FirewallRule:
     port: int | None     # None = any port
     action: str          # "allow" | "deny"
     id: str = field(default_factory=lambda: new_id("fw"))
+
+
+@dataclass
+class DistributedRule:
+    """East-west rule enforced at every VM's NIC (NSX distributed firewall).
+
+    source / destination: "any", a CIDR, or "tag:<security tag>".
+    """
+    name: str
+    source: str
+    destination: str
+    port: int | None
+    action: str
+    id: str = field(default_factory=lambda: new_id("dfw"))
 
 
 @dataclass
@@ -143,12 +171,17 @@ class ResourceStatus(str, Enum):
     PENDING = "pending"
     STOPPING = "stopping"
     DELETED = "deleted"
+    AVAILABLE = "available"   # disk / eip not attached, vpc ready
+    IN_USE = "in_use"         # disk / eip attached to an instance
     UNKNOWN = "unknown"
+
+
+RESOURCE_TYPES = ("instance", "disk", "vpc", "eip")
 
 
 @dataclass
 class CloudResource:
-    """One consistent structure for a compute instance from any provider.
+    """One consistent structure for a cloud resource from any provider.
 
     Every adapter must produce this shape. Downstream code (sync, API,
     reports) never has to know which cloud an instance came from.
@@ -159,12 +192,14 @@ class CloudResource:
     native_id: str           # the provider's own ID
     name: str
     status: ResourceStatus
-    vcpu: int | None
-    memory_gb: float | None
-    private_ip: str | None
-    public_ip: str | None
+    vcpu: int | None = None          # instances
+    memory_gb: float | None = None   # instances
+    private_ip: str | None = None    # instances
+    public_ip: str | None = None     # instances, eips
+    size_gb: float | None = None     # disks
     tags: dict[str, str] = field(default_factory=dict)
-    resource_type: str = "instance"
+    resource_type: str = "instance"  # instance | disk | vpc | eip
+    attributes: dict[str, Any] = field(default_factory=dict)  # type-specific extras (cidr, attached_to ...)
     synced_at: str = field(default_factory=now)
 
     @property

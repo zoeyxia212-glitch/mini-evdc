@@ -1,32 +1,49 @@
 """Command line.
 
-    python -m evdc demo                      # end-to-end walkthrough in the terminal
-    python -m evdc serve --config accounts.json --port 8080 --db evdc.db
+    python -m evdc demo                      end-to-end walkthrough in the terminal
+    python -m evdc serve [--config accounts.json] [--db evdc.db] [--port 8080] [--sync-interval 300]
+    python -m evdc create-user NAME --role org_admin --org ORG_ID [--db evdc.db]
 """
 from __future__ import annotations
 
 import argparse
+import os
 import sys
+import tempfile
 
 from .app import App
-from .clouds.fake import aliyun_throttle, aws_throttle
+from .clouds.fake import aliyun_throttle
 from .errors import TransientError
 from .logs import setup_logging
-from .models import FirewallRule, NatRule, Quota
+from .models import DistributedRule, FirewallRule, NatRule, Quota
+
+
+def _accounts(fast: bool = True) -> list[dict]:
+    retry = {"base_delay": 0.05} if fast else {}
+    return [
+        {"provider": "aliyun", "account": "ali-prod", "fake": True, "page_size": 10, "retry": retry,
+         "credentials": {"access_key_id": "LTAI-demo", "access_key_secret": "secret-demo"}},
+        {"provider": "aws", "account": "aws-syd", "fake": True, "page_size": 5, "retry": retry,
+         "credentials": {"access_key": "AKIA-demo", "secret_key": "secret-demo"}},
+        {"provider": "azure", "account": "az-au", "fake": True, "page_size": 5, "retry": retry,
+         "credentials": {"tenant_id": "tenant-demo", "client_id": "app-demo", "client_secret": "secret-demo"}},
+    ]
 
 
 def demo() -> None:
-    setup_logging("WARNING")  # keep the demo output readable; retries still show
-    app = App()
+    setup_logging("ERROR")  # keep the demo output readable
+    db = os.path.join(tempfile.mkdtemp(), "demo.db")
+    app = App(db)
     p = app.platform
 
-    print("== 1. Tenant set-up (org -> VDC -> network -> VMs) ==")
+    print("== 1. Tenant set-up: org -> VDC -> network -> template -> VMs ==")
     org = p.create_org("acme")
-    vdc = p.create_vdc(org.id, "acme-prod", "huabei1", Quota(vcpu=16, memory_gb=64, storage_gb=500))
-    net = p.create_network(vdc.id, "web-net", "192.168.10.0/24")
-    web = p.create_vm(vdc.id, "web-01", 2, 4, 40, "Ubuntu 22.04", net.id, power_on=True)
-    db = p.create_vm(vdc.id, "db-01", 4, 16, 200, "CentOS 7", net.id, power_on=True)
-    print(f"  {web.name} {web.ip}  |  {db.name} {db.ip}")
+    vdc = p.create_vdc(org.id, "acme-prod", "huabei1", Quota(vcpu=16, memory_gb=64, storage_gb=600))
+    net = p.create_network(vdc.id, "app-net", "192.168.10.0/24")
+    tpl = p.create_template(org.id, "ubuntu-small", "Ubuntu 22.04", 2, 4, 40)
+    web = p.create_vm_from_template(vdc.id, "web-01", tpl.id, net.id, power_on=True, tags=["web"])
+    db_vm = p.create_vm(vdc.id, "db-01", 4, 16, 200, "CentOS 7", net.id, power_on=True, tags=["db"])
+    print(f"  {web.name} {web.ip} {web.tags}  |  {db_vm.name} {db_vm.ip} {db_vm.tags}")
     print("  usage:", p.usage(vdc.id)["used"], "of", p.usage(vdc.id)["quota"])
 
     print("\n== 2. Quota check ==")
@@ -35,70 +52,69 @@ def demo() -> None:
     except Exception as exc:
         print("  refused:", exc)
 
-    print("\n== 3. Edge gateway: NAT + firewall (both are needed) ==")
+    print("\n== 3. Edge gateway (north-south): NAT + firewall are both needed ==")
     p.add_nat_rule(vdc.id, NatRule("DNAT", "203.0.113.10", web.ip, 443, 443))
-    print("  NAT only     ->", p.check_inbound(vdc.id, "8.8.8.8", "203.0.113.10", 443))
+    print("  NAT only     ->", p.check_inbound(vdc.id, "8.8.8.8", "203.0.113.10", 443)["result"])
     p.add_firewall_rule(vdc.id, FirewallRule("allow-https", "any", f"{web.ip}/32", 443, "allow"))
-    print("  NAT + allow  ->", p.check_inbound(vdc.id, "8.8.8.8", "203.0.113.10", 443))
+    print("  NAT + allow  ->", p.check_inbound(vdc.id, "8.8.8.8", "203.0.113.10", 443)["result"])
 
-    print("\n== 4. Multi-cloud sync with injected faults ==")
-    app.load_accounts([
-        {"provider": "aliyun", "account": "ali-prod", "fake": True, "page_size": 10,
-         "credentials": {"access_key_id": "LTAI-demo", "access_key_secret": "secret-demo"},
-         "retry": {"base_delay": 0.05, "max_attempts": 4}},
-        {"provider": "aws", "account": "aws-syd", "fake": True, "page_size": 5,
-         "credentials": {"access_key": "AKIA-demo", "secret_key": "secret-demo"},
-         "retry": {"base_delay": 0.05}},
-        {"provider": "azure", "account": "az-au", "fake": True, "page_size": 5,
-         "credentials": {"tenant_id": "tenant-demo", "client_id": "app-demo", "client_secret": "secret-demo"},
-         "retry": {"base_delay": 0.05}},
-    ])
+    print("\n== 4. Distributed firewall (east-west) by security tag ==")
+    p.add_dfw_rule(vdc.id, DistributedRule("web-to-db", "tag:web", "tag:db", 5432, "allow"))
+    p.set_dfw_default(vdc.id, "deny")
+    print("  web -> db :5432 ->", p.check_east_west(web.id, db_vm.id, 5432)["result"])
+    print("  db  -> web:22   ->", p.check_east_west(db_vm.id, web.id, 22)["result"])
+
+    print("\n== 5. Persistence: a new process sees the same platform ==")
+    again = App(db)
+    print(f"  reloaded {len(again.platform.vms)} VMs, {len(again.platform.edges[vdc.id].dfw)} DFW rule(s)")
+
+    print("\n== 6. Multi-cloud sync (instances, disks, VPCs, EIPs) with injected faults ==")
+    app.load_accounts(_accounts())
     ali, aws, az = (a.client for a in app.adapters[1:])
     ali.faults.fail_next(aliyun_throttle, aliyun_throttle)              # throttled twice, then OK
     aws.faults.fail_next(lambda: TransientError("503 Service Unavailable", "aws"))
-    print("  (retry warnings above/below are expected: throttling and a 503 were injected)")
     for r in app.sync():
-        print(f"  {r.provider:7} {r.account:9} {r.status:8} created={r.created:<3} "
-              f"deleted={r.deleted} skipped={r.skipped} {r.duration_s}s")
+        print(f"  {r.provider:7} {r.account:9} {r.status:8} created={r.created:<3} skipped={r.skipped} {r.duration_s}s")
 
-    print("\n== 5. Unified inventory (same shape for every cloud) ==")
-    rows = app.store.list_resources()
-    by_provider: dict[str, list] = {}
-    for r in rows:
-        by_provider.setdefault(r.provider, []).append(r)
-    for provider, items in by_provider.items():
-        running = sum(r.status.value == "running" for r in items)
-        print(f"  {provider:7} {len(items):3} instances, {running} running")
-    print("  sample:")
-    for provider, items in by_provider.items():
-        r = items[0]
-        print(f"    {r.uid[:45]:45} {r.name:12} {r.status.value:8} {r.vcpu}C/{r.memory_gb}G {r.private_ip}")
+    print("\n== 7. Unified inventory ==")
+    s = app.store.summary()
+    print(f"  {s['total']} resources {s['by_type']}")
+    print(f"  running capacity {s['running_vcpu']} vCPU / {s['running_memory_gb']} GB, disks {s['disk_gb']} GB")
+    for provider in ("aliyun", "aws", "azure", "evdc"):
+        for kind in ("instance", "disk", "vpc", "eip"):
+            items = app.store.list_resources(provider=provider, resource_type=kind)
+            if items:
+                r = items[0]
+                extra = r.attributes.get("cidr") or r.public_ip or (f"{r.size_gb:.0f} GB" if r.size_gb else "") \
+                    or f"{r.vcpu}C/{r.memory_gb}G"
+                print(f"    {provider:7} {kind:8} {r.name[:22]:22} {r.status.value:9} {extra}")
 
-    print("\n== 6. Second sync after an instance disappears from Aliyun ==")
-    ali.remove(next(r.native_id for r in rows if r.provider == "aliyun"))
+    print("\n== 8. Unified management + live status query ==")
+    targets = {}
+    for res in app.store.list_resources(status="stopped", resource_type="instance"):
+        targets.setdefault(res.provider, res)
+    for provider, res in targets.items():
+        r = app.manager.start(res.uid)
+        print(f"  start  {provider:7} {res.name:12} {r.previous} -> {r.status}")
+    for client in (ali, aws, az):
+        client.settle()  # the clouds finish booting
+    for provider, res in targets.items():
+        live = app.manager.refresh(res.uid)
+        print(f"  refresh {provider:6} {res.name:12} -> {live.status.value}")
+    running = app.store.list_resources(provider="aws", status="running", resource_type="instance")[0]
+    print(f"  reboot aws     {running.name:12} -> {app.manager.reboot(running.uid).status}")
+
+    print("\n== 9. Change history of one resource ==")
+    uid = targets["aws"].uid
+    for e in reversed(app.store.history(uid)):
+        print(f"  {e['kind']:8} {e['detail']}")
+
+    print("\n== 10. Second sync after a disk disappears from Aliyun ==")
+    ali._disks.pop()
     az.expire_all_tokens()  # forces the Azure adapter to re-authenticate
     for r in app.sync():
         print(f"  {r.provider:7} {r.status:8} created={r.created} updated={r.updated} "
               f"unchanged={r.unchanged} deleted={r.deleted}")
-
-    print("\n== 7. Unified management: one call, any cloud ==")
-    targets = {}
-    for res in app.store.list_resources(status="stopped"):
-        targets.setdefault(res.provider, res)
-    for provider, res in targets.items():
-        r = app.manager.start(res.uid)
-        print(f"  start {provider:7} {res.name:12} {r.previous} -> {r.status}")
-    for client in (ali, aws, az):
-        client.settle()  # the clouds finish booting
-    app.sync()
-    for provider, res in targets.items():
-        print(f"  after sync {provider:7} {res.name:12} -> {app.store.get(res.uid).status.value}")
-
-    print("\n== 8. Inventory summary ==")
-    s = app.store.summary()
-    print(f"  {s['total']} instances, running capacity {s['running_vcpu']} vCPU / {s['running_memory_gb']} GB")
-    for provider, counts in s["by_provider"].items():
-        print(f"  {provider:7} {counts}")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -112,15 +128,30 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--port", type=int, default=8080)
     s.add_argument("--sync-interval", type=float, default=0,
                    help="seconds between automatic syncs (0 = only on POST /sync)")
+    u = sub.add_parser("create-user", help="create a user and print its API key")
+    u.add_argument("name")
+    u.add_argument("--role", default="viewer", choices=["system_admin", "org_admin", "viewer"])
+    u.add_argument("--org", help="org id (not for system_admin)")
+    u.add_argument("--db", default="evdc.db")
     args = parser.parse_args(argv)
 
     if args.cmd == "demo":
         demo()
         return 0
 
+    if args.cmd == "create-user":
+        key = App(args.db).auth.create_user(args.name, args.role, args.org)
+        print(key)
+        return 0
+
     from .api import serve
     setup_logging("INFO")
     app = App(args.db)
+    key = app.bootstrap_admin()
+    if key and os.environ.get("EVDC_ADMIN_KEY"):
+        print("Created system admin 'admin' with the key from EVDC_ADMIN_KEY", file=sys.stderr)
+    elif key:
+        print(f"Created system admin 'admin'. API key (shown once): {key}", file=sys.stderr)
     if args.config:
         app.load_config(args.config)
     if args.sync_interval > 0:
