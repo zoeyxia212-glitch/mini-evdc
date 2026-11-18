@@ -21,7 +21,7 @@ import time
 from collections import deque
 from typing import Callable
 
-from ..errors import AuthError, ThrottledError, TransientError
+from ..errors import AuthError, IncorrectState, ResourceNotFound, ThrottledError, TransientError
 
 
 class FaultInjector:
@@ -96,6 +96,42 @@ class FakeAliyunEcs:
             "Instances": {"Instance": items[start:start + PageSize]},
         }
 
+    # --- lifecycle (real API: StartInstance / StopInstance, asynchronous) ---
+    def _find(self, instance_id: str) -> dict:
+        for inst in self._instances:
+            if inst["InstanceId"] == instance_id:
+                return inst
+        raise ResourceNotFound(f"The specified InstanceId {instance_id} does not exist.",
+                               "aliyun", "InvalidInstanceId.NotFound")
+
+    def _auth(self) -> None:
+        self.faults.before_call()
+        if self._creds != self._valid:
+            raise AuthError("Specified access key is not found.", "aliyun", "InvalidAccessKeyId.NotFound")
+
+    def start_instance(self, InstanceId: str) -> dict:
+        self._auth()
+        inst = self._find(InstanceId)
+        if inst["Status"] != "Stopped":
+            raise IncorrectState(f"The current status of the resource does not support this operation: "
+                                 f"{inst['Status']}", "aliyun", "IncorrectInstanceStatus")
+        inst["Status"] = "Starting"
+        return {"RequestId": "req-start"}
+
+    def stop_instance(self, InstanceId: str) -> dict:
+        self._auth()
+        inst = self._find(InstanceId)
+        if inst["Status"] != "Running":
+            raise IncorrectState(f"The current status of the resource does not support this operation: "
+                                 f"{inst['Status']}", "aliyun", "IncorrectInstanceStatus")
+        inst["Status"] = "Stopping"
+        return {"RequestId": "req-stop"}
+
+    def settle(self) -> None:
+        """Finish in-flight transitions (what the real cloud does after a few seconds)."""
+        for inst in self._instances:
+            inst["Status"] = {"Starting": "Running", "Stopping": "Stopped"}.get(inst["Status"], inst["Status"])
+
     # test helpers
     def remove(self, instance_id: str) -> None:
         self._instances = [x for x in self._instances if x["InstanceId"] != instance_id]
@@ -155,6 +191,41 @@ class FakeEc2:
         self.faults.before_call()
         self.type_calls += 1
         return {"InstanceTypes": [{"InstanceType": t, **self.TYPES[t]} for t in InstanceTypes if t in self.TYPES]}
+
+    # --- lifecycle (real API: start_instances / stop_instances, batch + async) ---
+    def _change(self, ids: list[str], allowed_from: str, to: str, key: str) -> dict:
+        self.faults.before_call()
+        if not self._ok:
+            raise AuthError("AWS was not able to validate the provided access credentials", "aws", "AuthFailure")
+        by_id = {i["InstanceId"]: i for i in self._instances}
+        missing = [i for i in ids if i not in by_id]
+        if missing:
+            raise ResourceNotFound(f"The instance ID '{missing[0]}' does not exist", "aws",
+                                   "InvalidInstanceID.NotFound")
+        out = []
+        for iid in ids:
+            inst = by_id[iid]
+            prev = inst["State"]["Name"]
+            if prev not in (allowed_from, to):
+                raise IncorrectState(f"The instance '{iid}' is not in a state from which it can be changed.",
+                                     "aws", "IncorrectInstanceState")
+            if prev == allowed_from:
+                inst["State"] = {"Code": 0, "Name": to}
+            out.append({"InstanceId": iid, "PreviousState": {"Name": prev},
+                        "CurrentState": dict(inst["State"])})
+        return {key: out}
+
+    def start_instances(self, InstanceIds: list[str]) -> dict:
+        return self._change(InstanceIds, "stopped", "pending", "StartingInstances")
+
+    def stop_instances(self, InstanceIds: list[str]) -> dict:
+        return self._change(InstanceIds, "running", "stopping", "StoppingInstances")
+
+    def settle(self) -> None:
+        for inst in self._instances:
+            name = {"pending": "running", "stopping": "stopped"}.get(inst["State"]["Name"])
+            if name:
+                inst["State"] = {"Code": 16 if name == "running" else 80, "Name": name}
 
 
 def aws_throttle() -> Exception:
@@ -226,6 +297,32 @@ class FakeAzure:
     def list_sizes(self, token: str, location: str) -> dict:
         self.faults.before_call()
         return {"value": [{"name": n, "numberOfCores": c, "memoryInMB": m} for n, (c, m) in self.SIZES.items()]}
+
+    # --- lifecycle (real API: POST .../start and .../deallocate, return 202 Accepted) ---
+    def _power_action(self, token: str, vm_id: str, new_power: str) -> dict:
+        self.faults.before_call()
+        if self._tokens.get(token, 0) < time.time():
+            raise AuthError("The access token expiry UTC time is earlier than current UTC time.",
+                            "azure", "ExpiredAuthenticationToken")
+        vm = next((v for v in self._vms if v["id"] == vm_id), None)
+        if vm is None:
+            raise ResourceNotFound(f"The Resource '{vm_id}' was not found.", "azure", "ResourceNotFound")
+        statuses = vm["properties"]["instanceView"]["statuses"]
+        statuses[:] = [s for s in statuses if not s["code"].startswith("PowerState/")]
+        statuses.append({"code": f"PowerState/{new_power}"})
+        return {"status": 202}
+
+    def start(self, token: str, vm_id: str) -> dict:
+        return self._power_action(token, vm_id, "starting")
+
+    def deallocate(self, token: str, vm_id: str) -> dict:
+        return self._power_action(token, vm_id, "deallocating")
+
+    def settle(self) -> None:
+        for vm in self._vms:
+            for s in vm["properties"]["instanceView"]["statuses"]:
+                s["code"] = {"PowerState/starting": "PowerState/running",
+                             "PowerState/deallocating": "PowerState/deallocated"}.get(s["code"], s["code"])
 
 
 def azure_throttle() -> Exception:

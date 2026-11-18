@@ -38,6 +38,16 @@ class AliyunAdapter(ProviderAdapter):
                 return
             page += 1
 
+    def start(self, native_id: str) -> ResourceStatus:
+        self.authenticate()
+        self.call("StartInstance", lambda: self.client.start_instance(InstanceId=native_id))
+        return ResourceStatus.PENDING
+
+    def stop(self, native_id: str) -> ResourceStatus:
+        self.authenticate()
+        self.call("StopInstance", lambda: self.client.stop_instance(InstanceId=native_id))
+        return ResourceStatus.STOPPING
+
     def normalize(self, raw: dict) -> CloudResource:
         private = raw.get("VpcAttributes", {}).get("PrivateIpAddress", {}).get("IpAddress", [])
         # public IP is either a classic public IP or an attached EIP

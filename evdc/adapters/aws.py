@@ -52,6 +52,18 @@ class AwsAdapter(ProviderAdapter):
         for t in resp["InstanceTypes"]:
             self._type_cache[t["InstanceType"]] = t
 
+    def _change(self, op: str, method: str, key: str, native_id: str) -> ResourceStatus:
+        self.authenticate()
+        resp = self.call(op, lambda: getattr(self.client, method)(InstanceIds=[native_id]))
+        state = resp[key][0]["CurrentState"]["Name"]
+        return STATUS.get(state, ResourceStatus.UNKNOWN)
+
+    def start(self, native_id: str) -> ResourceStatus:
+        return self._change("StartInstances", "start_instances", "StartingInstances", native_id)
+
+    def stop(self, native_id: str) -> ResourceStatus:
+        return self._change("StopInstances", "stop_instances", "StoppingInstances", native_id)
+
     def normalize(self, raw: dict) -> CloudResource:
         tags = {t["Key"]: t["Value"] for t in raw.get("Tags", [])}
         name = tags.pop("Name", raw["InstanceId"])

@@ -9,6 +9,7 @@ Rules:
 """
 from __future__ import annotations
 
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
@@ -71,3 +72,38 @@ class SyncService:
     def sync_all(self) -> list[SyncReport]:
         with ThreadPoolExecutor(max_workers=self.max_workers, thread_name_prefix="sync") as pool:
             return list(pool.map(self.sync_one, self.adapters))
+
+
+class SyncScheduler:
+    """Runs a job every `interval` seconds in a background thread.
+
+    The job itself is responsible for refusing overlapping runs (App.sync
+    does this with a lock), so a slow sync is skipped, never stacked.
+    """
+
+    def __init__(self, job, interval: float):
+        if interval <= 0:
+            raise ValueError("interval must be > 0")
+        self.job = job
+        self.interval = interval
+        self.runs = 0
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._loop, name="sync-scheduler", daemon=True)
+
+    def _loop(self) -> None:
+        while not self._stop.is_set():
+            try:
+                self.job()
+                self.runs += 1
+            except Exception as exc:  # noqa: BLE001 - keep the scheduler alive
+                log.warning("scheduled sync skipped", extra={"ctx": {"error": str(exc)}})
+            self._stop.wait(self.interval)
+
+    def start(self) -> "SyncScheduler":
+        self._thread.start()
+        log.info("scheduler started", extra={"ctx": {"interval_s": self.interval}})
+        return self
+
+    def stop(self, timeout: float = 5.0) -> None:
+        self._stop.set()
+        self._thread.join(timeout)

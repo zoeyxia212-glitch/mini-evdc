@@ -17,6 +17,10 @@ class InvalidState(EvdcError):
     pass
 
 
+class SyncInProgress(EvdcError):
+    """A sync is already running; overlapping runs are refused."""
+
+
 # --- cloud API errors -----------------------------------------------------
 
 class CloudApiError(Exception):
@@ -46,6 +50,14 @@ class TransientError(CloudApiError):
 class ApiTimeout(CloudApiError):
     """The call took longer than the configured timeout."""
     retryable = True
+
+
+class ResourceNotFound(CloudApiError):
+    """The instance does not exist (any more) on the provider side."""
+
+
+class IncorrectState(CloudApiError):
+    """The instance is in a state that does not allow this action."""
 
 
 def is_retryable(exc: BaseException) -> bool:

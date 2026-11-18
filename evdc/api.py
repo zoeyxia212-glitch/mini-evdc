@@ -17,6 +17,9 @@
     POST   /sync                         run multi-cloud sync now
     GET    /sync/history
     GET    /resources?provider=&status=  unified inventory across all clouds
+    GET    /resources/summary            counts per cloud / status, running vCPU + memory
+    POST   /resources/start              {uid}   start an instance on whichever cloud owns it
+    POST   /resources/stop               {uid}   stop it (Azure: deallocate)
 """
 from __future__ import annotations
 
@@ -26,7 +29,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
 from .app import App
-from .errors import EvdcError, InvalidState, NotFound, QuotaExceeded
+from .errors import (CloudApiError, EvdcError, IncorrectState, InvalidState, NotFound, QuotaExceeded,
+                     ResourceNotFound, SyncInProgress)
 from .logs import get_logger
 from .models import FirewallRule, NatRule, NetworkType, Quota, to_dict
 
@@ -89,6 +93,13 @@ def build_routes(app: App):
     def resources(_b, q):
         return 200, app.store.list_resources(q.get("provider"), q.get("status"))
 
+    def resources_summary(_b, _q):
+        return 200, app.store.summary()
+
+    def resource_action(b, _q, action):
+        result = getattr(app.manager, action)(b["uid"])
+        return (202 if result.changed else 200), result.__dict__
+
     def health(_b, _q):
         return 200, {"status": "ok", "accounts": [f"{a.provider}:{a.account}" for a in app.adapters]}
 
@@ -111,6 +122,8 @@ def build_routes(app: App):
         ("POST", r"/sync", sync_now),
         ("GET", r"/sync/history", sync_history),
         ("GET", r"/resources", resources),
+        ("GET", r"/resources/summary", resources_summary),
+        ("POST", r"/resources/(?P<action>start|stop)", resource_action),
     ]
 
 
@@ -143,10 +156,14 @@ def make_handler(app: App):
                 body = json.loads(self.rfile.read(length) or b"{}") if length else {}
                 status, payload = fn(body, query, **match.groupdict())
                 self._send(status, payload)
-            except NotFound as exc:
+            except (NotFound, ResourceNotFound) as exc:
                 self._send(404, {"error": str(exc)})
-            except (QuotaExceeded, InvalidState) as exc:
+            except (QuotaExceeded, InvalidState, SyncInProgress, IncorrectState) as exc:
                 self._send(409, {"error": str(exc)})
+            except NotImplementedError as exc:
+                self._send(501, {"error": str(exc)})
+            except CloudApiError as exc:  # provider failed after retries
+                self._send(502, {"error": f"{exc.provider} {exc.code}: {exc}"})
             except (EvdcError, KeyError, ValueError, TypeError) as exc:
                 self._send(400, {"error": f"{type(exc).__name__}: {exc}"})
 

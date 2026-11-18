@@ -81,6 +81,25 @@ def demo() -> None:
         print(f"  {r.provider:7} {r.status:8} created={r.created} updated={r.updated} "
               f"unchanged={r.unchanged} deleted={r.deleted}")
 
+    print("\n== 7. Unified management: one call, any cloud ==")
+    targets = {}
+    for res in app.store.list_resources(status="stopped"):
+        targets.setdefault(res.provider, res)
+    for provider, res in targets.items():
+        r = app.manager.start(res.uid)
+        print(f"  start {provider:7} {res.name:12} {r.previous} -> {r.status}")
+    for client in (ali, aws, az):
+        client.settle()  # the clouds finish booting
+    app.sync()
+    for provider, res in targets.items():
+        print(f"  after sync {provider:7} {res.name:12} -> {app.store.get(res.uid).status.value}")
+
+    print("\n== 8. Inventory summary ==")
+    s = app.store.summary()
+    print(f"  {s['total']} instances, running capacity {s['running_vcpu']} vCPU / {s['running_memory_gb']} GB")
+    for provider, counts in s["by_provider"].items():
+        print(f"  {provider:7} {counts}")
+
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="evdc", description="Mini EvDC")
@@ -91,6 +110,8 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--db", default="evdc.db")
     s.add_argument("--host", default="127.0.0.1")
     s.add_argument("--port", type=int, default=8080)
+    s.add_argument("--sync-interval", type=float, default=0,
+                   help="seconds between automatic syncs (0 = only on POST /sync)")
     args = parser.parse_args(argv)
 
     if args.cmd == "demo":
@@ -102,12 +123,18 @@ def main(argv: list[str] | None = None) -> int:
     app = App(args.db)
     if args.config:
         app.load_config(args.config)
+    if args.sync_interval > 0:
+        app.start_scheduler(args.sync_interval)
     server = serve(app, args.host, args.port)
     print(f"Mini EvDC API on http://{args.host}:{args.port}  (Ctrl+C to stop)", file=sys.stderr)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         pass
+    finally:
+        if app.scheduler:
+            app.scheduler.stop()
+        server.server_close()
     return 0
 
 

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from typing import Iterator
 
-from ..models import CloudResource
+from ..models import CloudResource, ResourceStatus
 from .base import ProviderAdapter, register
 
 
@@ -16,3 +16,11 @@ class EvdcLocalAdapter(ProviderAdapter):
 
     def normalize(self, raw: CloudResource) -> CloudResource:  # type: ignore[override]
         return raw
+
+    def start(self, native_id: str) -> ResourceStatus:
+        self.client.power(native_id, "power_on")
+        return ResourceStatus.RUNNING
+
+    def stop(self, native_id: str) -> ResourceStatus:
+        self.client.power(native_id, "shutdown_guest")
+        return ResourceStatus.STOPPED

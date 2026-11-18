@@ -11,14 +11,17 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 from typing import Any, Callable
 
 from .adapters import ADAPTERS, ProviderAdapter
 from .clouds.fake import FakeAliyunEcs, FakeAzure, FakeEc2
 from .core import EvdcPlatform
+from .errors import SyncInProgress
+from .manage import ResourceManager
 from .retry import RetryPolicy
 from .store import Store
-from .sync import SyncService
+from .sync import SyncScheduler, SyncService
 
 
 def resolve(value: Any) -> Any:
@@ -47,6 +50,8 @@ class App:
         self.platform = EvdcPlatform()
         self.store = Store(db_path)
         self.adapters: list[ProviderAdapter] = []
+        self.scheduler: SyncScheduler | None = None
+        self._sync_lock = threading.Lock()
         self.add_account("evdc", "local", self.platform)
 
     def add_account(self, provider: str, account: str, client: Any, **options) -> ProviderAdapter:
@@ -76,4 +81,18 @@ class App:
             self.load_accounts(json.load(fh)["accounts"])
 
     def sync(self):
-        return SyncService(self.store, self.adapters).sync_all()
+        """Run one full sync. Refuses (SyncInProgress) if another sync is still running."""
+        if not self._sync_lock.acquire(blocking=False):
+            raise SyncInProgress("a sync is already running")
+        try:
+            return SyncService(self.store, self.adapters).sync_all()
+        finally:
+            self._sync_lock.release()
+
+    @property
+    def manager(self) -> ResourceManager:
+        return ResourceManager(self.store, self.adapters)
+
+    def start_scheduler(self, interval: float) -> SyncScheduler:
+        self.scheduler = SyncScheduler(self.sync, interval).start()
+        return self.scheduler

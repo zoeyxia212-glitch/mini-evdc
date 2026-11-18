@@ -63,6 +63,20 @@ class ApiTests(unittest.TestCase):
                                          "memory_gb", "private_ip", "public_ip", "tags", "resource_type",
                                          "synced_at", "uid"})
 
+    def test_summary_and_actions(self):
+        self.call("POST", "/sync")
+        s, summary = self.call("GET", "/resources/summary")
+        self.assertEqual((s, summary["by_provider"]["aws"]["total"]), (200, 17))
+
+        _, stopped = self.call("GET", "/resources?provider=aws&status=stopped")
+        uid = stopped[0]["uid"]
+        s, r = self.call("POST", "/resources/start", {"uid": uid})
+        self.assertEqual((s, r["status"], r["changed"]), (202, "pending", True))
+        s, r = self.call("POST", "/resources/start", {"uid": uid})
+        self.assertEqual((s, r["changed"]), (200, False))
+        self.assertEqual(self.call("POST", "/resources/start", {"uid": "aws:aws-syd:i-nope"})[0], 404)
+        self.assertEqual(self.call("POST", "/resources/reboot", {"uid": uid})[0], 404)
+
     def test_errors(self):
         self.assertEqual(self.call("GET", "/nope")[0], 404)
         self.assertEqual(self.call("POST", "/vms/vm-missing/power", {"action": "power_on"})[0], 404)

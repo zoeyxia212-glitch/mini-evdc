@@ -18,7 +18,7 @@ from typing import Any, Callable, Iterator, TypeVar
 
 from ..errors import AuthError
 from ..logs import get_logger
-from ..models import CloudResource
+from ..models import CloudResource, ResourceStatus
 from ..retry import RetryPolicy, run_with_retry
 
 T = TypeVar("T")
@@ -58,6 +58,16 @@ class ProviderAdapter(ABC):
     @abstractmethod
     def normalize(self, raw: dict) -> CloudResource:
         ...
+
+    # -- lifecycle actions (unified management) ---------------------------
+    # Return the status the instance moves to right away (usually a
+    # transitional one such as PENDING / STOPPING); the next sync records
+    # the final state. Adapters that cannot do this keep the default.
+    def start(self, native_id: str) -> ResourceStatus:
+        raise NotImplementedError(f"{self.provider} adapter does not support start")
+
+    def stop(self, native_id: str) -> ResourceStatus:
+        raise NotImplementedError(f"{self.provider} adapter does not support stop")
 
     # -- shared machinery -------------------------------------------------
     def call(self, op: str, fn: Callable[[], T]) -> T:

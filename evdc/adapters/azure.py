@@ -73,6 +73,17 @@ class AzureAdapter(ProviderAdapter):
             self._sizes[(location, s["name"])] = (s["numberOfCores"], s["memoryInMB"])
         self._size_locations.add(location)
 
+    def start(self, native_id: str) -> ResourceStatus:
+        self.authenticate()
+        self.call("StartVM", lambda: self.client.start(self._token, native_id))
+        return ResourceStatus.PENDING
+
+    def stop(self, native_id: str) -> ResourceStatus:
+        """Azure 'stop' still bills compute; deallocate is what actually stops charges."""
+        self.authenticate()
+        self.call("DeallocateVM", lambda: self.client.deallocate(self._token, native_id))
+        return ResourceStatus.STOPPING
+
     def normalize(self, raw: dict) -> CloudResource:
         props = raw["properties"]
         size = props["hardwareProfile"]["vmSize"]

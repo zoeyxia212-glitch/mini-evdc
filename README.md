@@ -4,12 +4,30 @@ A simplified, runnable re-creation of **EvDC (Enterprise Virtual Data Center)**,
 platform I worked on at VNET, together with the **multi-cloud integration service** that connected
 Alibaba Cloud, AWS and Azure to it.
 
+![tests](https://github.com/<your-github-username>/mini-evdc/actions/workflows/tests.yml/badge.svg)
+
 Pure Python 3.10+ standard library. No dependencies, no cloud account needed (fake clouds are built in).
 
 ```
-python -m evdc demo                 # end-to-end walkthrough in the terminal
-python -m unittest discover -s tests -p "test*.py" -t .   # 35 tests
-python -m evdc serve --config accounts.example.json      # REST API on :8080
+python -m evdc demo                                        # end-to-end walkthrough in the terminal
+python -m unittest discover -s tests -p "test*.py" -t .    # 47 tests
+python -m evdc serve --config accounts.example.json --sync-interval 300   # REST API on :8080
+```
+
+Or with Docker:
+
+```
+docker build -t mini-evdc .
+docker run -p 8080:8080 -e ALIYUN_AK=... -e ALIYUN_SK=... -v evdc-data:/data mini-evdc
+```
+
+## Try the API
+
+```
+curl -X POST localhost:8080/sync                         # pull every cloud into the inventory
+curl localhost:8080/resources/summary                    # counts per cloud and status
+curl "localhost:8080/resources?provider=aws&status=stopped"
+curl -X POST localhost:8080/resources/start -d '{"uid": "aws:aws-syd:i-00000000000000001"}'
 ```
 
 ## Architecture
@@ -49,6 +67,10 @@ operation and attempt on every line).
 | **Timeout & retry** | `RetryPolicy(max_attempts, base_delay, max_delay, timeout)`. Auth errors are not retried blindly |
 | **Partial-failure safety** | A sync that fails half-way never marks resources as deleted; one failing provider does not stop the others |
 | **Structured logging** | JSON lines, ready for ELK / CloudWatch / SLS |
+| **Unified management** | `manage.py` – `start` / `stop` any instance by its `uid`; the manager finds the owning adapter and calls the provider (Aliyun `StartInstance`, EC2 `start_instances`, Azure `start` / `deallocate`). Already-running is a no-op; the transitional status is recorded at once and the final one arrives with the next sync |
+| **Scheduled sync** | `SyncScheduler` runs a sync every N seconds; a lock refuses overlapping runs (HTTP 409) so a slow sync is skipped, never stacked |
+| **Inventory summary** | `GET /resources/summary` – totals per cloud and status, running vCPU and memory |
+| **Error mapping** | not found → 404, quota / wrong state / sync running → 409, provider still failing after retries → 502, unsupported action → 501 |
 | **Platform core** | Quotas, IP allocation, VM power state machine, single snapshot, edge firewall (first-match, default deny), DNAT/SNAT, task history |
 
 ### How each cloud's data is mapped
@@ -72,12 +94,16 @@ evdc/
   adapters/      base.py (interface, retry + re-auth), aliyun.py, aws.py, azure.py, local.py
   clouds/fake.py fake Aliyun / EC2 / Azure APIs in real response shapes, with fault injection
   retry.py       timeout + backoff + retry
-  sync.py        sync engine
+  sync.py        sync engine + scheduler
+  manage.py      start / stop any instance by uid
   store.py       SQLite inventory + sync history
   logs.py        JSON logging
   app.py         config → clients → adapters
   api.py         REST API (http.server)
-tests/           35 unittest cases: core rules, pagination, mapping, retries, timeouts, re-auth, sync, API
+tests/           47 unittest cases: core rules, pagination, mapping, retries, timeouts, re-auth,
+                 sync, lifecycle actions, scheduler, API
+.github/workflows/tests.yml   CI on Python 3.10 – 3.13
+Dockerfile       non-root image, data volume, sync every 5 minutes
 ```
 
 ## Using real clouds
@@ -90,7 +116,7 @@ wrapper that also translates SDK exceptions into `ThrottledError` / `TransientEr
 import boto3
 from botocore.exceptions import ClientError
 from evdc.app import CLIENT_FACTORIES
-from evdc.errors import AuthError, ThrottledError, TransientError
+from evdc.errors import AuthError, IncorrectState, ResourceNotFound, ThrottledError, TransientError
 
 class Ec2Client:
     def __init__(self, c):
@@ -105,11 +131,19 @@ class Ec2Client:
                 raise ThrottledError(str(e), "aws", code)
             if code in ("AuthFailure", "UnauthorizedOperation"):
                 raise AuthError(str(e), "aws", code)
+            if code == "InvalidInstanceID.NotFound":
+                raise ResourceNotFound(str(e), "aws", code)
+            if code == "IncorrectInstanceState":
+                raise IncorrectState(str(e), "aws", code)
             raise TransientError(str(e), "aws", code)
     def describe_instances(self, **kw):
         return self._wrap(self._ec2.describe_instances, **kw)
     def describe_instance_types(self, **kw):
         return self._wrap(self._ec2.describe_instance_types, **kw)
+    def start_instances(self, **kw):
+        return self._wrap(self._ec2.start_instances, **kw)
+    def stop_instances(self, **kw):
+        return self._wrap(self._ec2.stop_instances, **kw)
 
 CLIENT_FACTORIES["aws"] = Ec2Client     # then set "fake": false in the config
 ```

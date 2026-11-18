@@ -95,6 +95,35 @@ class Store:
             rows = self._conn.execute(sql, args).fetchall()
         return [self._row_to_resource(r) for r in rows]
 
+    def get(self, uid: str) -> CloudResource | None:
+        with self._lock:
+            row = self._conn.execute("SELECT * FROM resources WHERE uid=?", (uid,)).fetchone()
+        return self._row_to_resource(row) if row else None
+
+    def set_status(self, uid: str, status: ResourceStatus) -> None:
+        with self._lock:
+            self._conn.execute("UPDATE resources SET status=?, synced_at=? WHERE uid=?",
+                               (status.value, now(), uid))
+            self._conn.commit()
+
+    def summary(self) -> dict:
+        """Counts per provider/status plus capacity of running instances (deleted excluded)."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT provider, status, COUNT(*) AS n, SUM(COALESCE(vcpu,0)) AS cpu,"
+                " SUM(COALESCE(memory_gb,0)) AS mem FROM resources WHERE status != ?"
+                " GROUP BY provider, status", (ResourceStatus.DELETED.value,)).fetchall()
+        out: dict = {"total": 0, "running_vcpu": 0, "running_memory_gb": 0.0, "by_provider": {}}
+        for r in rows:
+            prov = out["by_provider"].setdefault(r["provider"], {"total": 0})
+            prov[r["status"]] = r["n"]
+            prov["total"] += r["n"]
+            out["total"] += r["n"]
+            if r["status"] == ResourceStatus.RUNNING.value:
+                out["running_vcpu"] += r["cpu"]
+                out["running_memory_gb"] = round(out["running_memory_gb"] + r["mem"], 2)
+        return out
+
     @staticmethod
     def _row_to_resource(row: sqlite3.Row) -> CloudResource:
         return CloudResource(
