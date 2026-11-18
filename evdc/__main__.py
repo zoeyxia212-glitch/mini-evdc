@@ -15,7 +15,9 @@ from .app import App
 from .clouds.fake import aliyun_throttle
 from .errors import TransientError
 from .logs import setup_logging
+from .metrics import render as render_metrics
 from .models import DistributedRule, FirewallRule, NatRule, Quota
+from .pricing import cost_report
 
 
 def _accounts(fast: bool = True) -> list[dict]:
@@ -115,6 +117,32 @@ def demo() -> None:
     for r in app.sync():
         print(f"  {r.provider:7} {r.status:8} created={r.created} updated={r.updated} "
               f"unchanged={r.unchanged} deleted={r.deleted}")
+
+    print("\n== 11. Cost estimate (Komiser-style, illustrative prices) ==")
+    rep = cost_report(app.store.list_resources(), top=3)
+    print(f"  total ≈ ${rep['total_monthly']}/month  by provider {rep['by_provider']}")
+    print(f"  waste ≈ ${rep['waste_monthly']}/month on {len(rep['waste'])} idle disks / public IPs")
+    for t in rep["top"]:
+        print(f"    top: {t['provider']:7} {t['type']:8} {t['name'][:20]:20} ${t['monthly_cost']}")
+
+    print("\n== 12. Governance policies (Cloud Custodian-style, dry run first) ==")
+    for name in ("unattached-disks", "idle-public-ips", "untagged-instances", "stop-test-instances"):
+        out = app.policies.run(name)
+        print(f"  {name:20} scanned={out['scanned']:<3} matched={out['matched']:<3} "
+              f"(${out['monthly_cost_of_matches']}/month)")
+    out = app.policies.run("unattached-disks", dry_run=False)
+    print(f"  applied unattached-disks: {out['matched']} disks marked delete-in-30d")
+
+    print("\n== 13. Query + resource graph (CloudQuery / Cartography-style) ==")
+    page, total = app.store.query(resource_type="instance", tag="env:prod", sort="-vcpu", limit=3)
+    print(f"  env=prod instances: {total}; biggest: {[f'{r.name} {r.vcpu}C' for r in page]}")
+    inst = app.store.list_resources(provider="aliyun", resource_type="instance")[0]
+    for e in app.store.relations(inst.uid)["edges"]:
+        print(f"  {inst.name} --{e['relation']}--> {e['name']} ({e['status']})")
+
+    print("\n== 14. Prometheus metrics (GET /metrics), first lines ==")
+    for line in render_metrics(app).splitlines()[:5]:
+        print("  " + line)
 
 
 def main(argv: list[str] | None = None) -> int:

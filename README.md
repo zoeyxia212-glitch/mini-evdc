@@ -10,14 +10,17 @@ Alibaba Cloud, AWS and Azure to it.
   snapshots, an edge gateway (firewall + NAT) and a distributed firewall driven by security tags.
 - **Multi-cloud integration:** instances, disks, VPCs and public IPs from three clouds mapped into one
   resource model, kept in sync, queryable live, and manageable (start / stop / reboot) through one API.
+- **Cost & governance:** per-resource monthly cost estimates and a waste report, JSON governance
+  policies with dry-run (find unattached disks, idle public IPs, untagged or test instances, then mark
+  or stop them), a resource relationship graph, flexible queries with CSV export, Prometheus metrics.
 - **Engineering:** API keys with role-based access, SQLite persistence, change history, timeouts and
-  retries, structured JSON logs, 71 tests, CI on Python 3.10 – 3.13, Docker image.
+  retries, structured JSON logs, 89 tests, CI on Python 3.10 – 3.13, Docker image.
 
 Pure Python standard library: no dependencies and no cloud account needed (realistic fake clouds are built in).
 
 ```
 python -m evdc demo                                        # end-to-end walkthrough in the terminal
-python -m unittest discover -s tests -p "test*.py" -t .    # 71 tests
+python -m unittest discover -s tests -p "test*.py" -t .    # 89 tests
 python -m evdc serve --config accounts.example.json --sync-interval 300   # REST API on :8080
 ```
 
@@ -68,6 +71,18 @@ attempt on every line).
 | **Unified management** | `start` / `stop` / `reboot` any instance by uid. Already-running is a no-op; invalid transitions are refused before calling the cloud; the provider's own refusal is surfaced as 409 |
 | **Change history** | Every create, field change (with old → new values), deletion and action is recorded per resource |
 | **Inventory summary** | Totals by provider, type and status; running vCPU / memory; total disk |
+
+### Cost, governance and observability
+
+| Feature | Details |
+|---|---|
+| **Cost estimate** | `GET /costs` – monthly estimate per resource, totals by provider and type, top spenders. Instances are billed only while running; disks always; public IPs at a flat fee. Prices live in `pricing.py` and are illustrative – swap in the AWS Price List API, Aliyun BSS or the Azure Retail Prices API for real numbers |
+| **Waste report** | Unattached disks and unattached public IPs, with what they cost per month |
+| **Governance policies** | JSON policies: `resource` + `filters` (`eq ne in not_in gt gte lt lte contains regex present absent` on any field, `tag:<k>`, `attributes.<k>`, `monthly_cost`, `marked`) + `actions` (`report`, `mark`, `unmark`, `stop`). **Dry run by default**; anyone may preview, only a system admin may act. Four built-in policies: `unattached-disks`, `idle-public-ips`, `untagged-instances`, `stop-test-instances` |
+| **Mark, then act** | Like Cloud Custodian's mark-for-op: a first policy marks resources (e.g. `delete-in-30d`), a later one selects `marked` resources. Marks are recorded in the change history |
+| **Query** | `GET /resources` filters by provider, account, region, type, status, `tag=env` / `tag=env:prod`, name substring; `sort=-vcpu` etc.; `limit` / `offset` with an `X-Total-Count` header. `GET /resources.csv` exports the same query |
+| **Resource graph** | `GET /resources/relations?uid=` – an instance's disks and public IPs, or the instance a disk / IP belongs to. `GET /resources/orphans` – disks and IPs still pointing at instances that are gone |
+| **Prometheus metrics** | `GET /metrics` – resource counts by provider / account / type / status, estimated monthly cost, last sync success and time per account, platform object counts |
 
 ### Platform core (EvDC rules)
 
@@ -130,6 +145,16 @@ curl -H "$K" "localhost:8080/resources?provider=aws&type=disk&status=available" 
 curl -H "$K" localhost:8080/resources/summary
 curl -H "$K" -X POST localhost:8080/resources/start -d '{"uid": "aws:aws-syd:i-00000000000000001"}'
 curl -H "$K" "localhost:8080/resources/history?uid=aws:aws-syd:i-00000000000000001"
+
+curl -H "$K" "localhost:8080/resources?type=instance&tag=env:prod&sort=-vcpu&limit=5"
+curl -H "$K" "localhost:8080/resources.csv?provider=aliyun" -o inventory.csv
+curl -H "$K" "localhost:8080/resources/relations?uid=aliyun:ali-prod:i-bp1000000000000000"
+curl -H "$K" localhost:8080/costs
+curl -H "$K" -X POST localhost:8080/policies/run -d '{"name": "unattached-disks"}'                    # preview
+curl -H "$K" -X POST localhost:8080/policies/run -d '{"name": "unattached-disks", "dry_run": false}'  # act
+curl -H "$K" -X POST localhost:8080/policies/run -d '{"policy": {"name": "big-vms", "resource": "instance",
+     "filters": [{"key": "vcpu", "op": "gte", "value": 8}, {"key": "status", "op": "eq", "value": "running"}]}}'
+curl localhost:8080/metrics                                                                      # Prometheus
 ```
 
 Errors: 400 bad input · 401 no/invalid key · 403 role or org not allowed · 404 not found ·
@@ -156,14 +181,18 @@ evdc/
   auth.py        API keys, roles, org scoping
   adapters/      base.py (interface, retry + re-auth), aliyun.py, aws.py, azure.py, local.py
   clouds/fake.py fake Aliyun / EC2 / Azure APIs in real response shapes, with fault injection
+  pricing.py     monthly cost estimates + waste report
+  policy.py      governance policies: filters, actions, dry run
+  metrics.py     Prometheus text format
   retry.py       timeout + backoff + retry
   sync.py        sync engine + scheduler
   manage.py      refresh / start / stop / reboot any instance by uid
-  store.py       SQLite: inventory, change history, sync runs, platform state, users
+  store.py       SQLite: inventory, queries, relations, change history, marks, sync and policy runs,
+                 platform state, users
   logs.py        JSON logging
   app.py         config → clients → adapters; wiring
   api.py         REST API (http.server)
-tests/           71 unittest cases
+tests/           89 unittest cases
 .github/workflows/tests.yml   CI on Python 3.10 – 3.13
 Dockerfile       non-root image, data volume, scheduled sync
 ```
@@ -207,6 +236,20 @@ class Ec2Client:
 
 CLIENT_FACTORIES["aws"] = Ec2Client     # then set "fake": false in the config
 ```
+
+## Prior art and what this borrows
+
+This is a learning-sized project. These open-source tools solve the same problems at production
+scale, and each one inspired a part of Mini EvDC:
+
+| Project | What it does | Idea used here |
+|---|---|---|
+| [Apache Libcloud](https://github.com/apache/libcloud) | One Python API over 60+ cloud providers through per-provider drivers | Same driver / adapter pattern: `ProviderAdapter` + a registry, one class per cloud |
+| [CloudQuery](https://github.com/cloudquery/cloudquery) | Syncs cloud configuration into a database as a multi-cloud asset inventory you query with SQL | Sync into SQLite, normalised schema across clouds, queryable inventory |
+| [Steampipe](https://github.com/turbot/steampipe) | Queries cloud APIs live with SQL | Live status query (`refresh`) next to the synced inventory |
+| [Cloud Custodian](https://github.com/cloud-custodian/cloud-custodian) | Policy-as-code: filters select resources, actions act on them; mark-for-op for delayed clean-up | JSON policies with filters + actions, dry run, `mark` then act |
+| [Komiser](https://github.com/tailwarden/komiser) | Cloud asset inventory with cost broken down per resource | Per-resource cost estimate and waste report |
+| [Cartography](https://github.com/cartography-cncf/cartography) | Builds a graph of cloud assets and their relationships | Relationship view (instance ↔ disk ↔ public IP) and orphan detection |
 
 ## Relation to the real EvDC
 

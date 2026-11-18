@@ -58,12 +58,28 @@ Access: S = system_admin only, T = tenant (org_admin / viewer of the owning org,
     GET    /resources/summary                         R
     GET    /resources/history?uid=&limit=             R  (no uid = latest events everywhere)
     POST   /resources/{refresh|start|stop|reboot} {uid}   S
+      query params for GET /resources: provider status type account region
+      tag=env | tag=env:prod   name=<substring>   sort=name|-vcpu|...   limit offset
+      (total count in the X-Total-Count header)
+    GET    /resources.csv?<same filters>              R  CSV export
+    GET    /resources/relations?uid=                  R  disks / IPs of an instance, or what a disk is attached to
+    GET    /resources/orphans                         R  disks / IPs pointing at instances that no longer exist
+  Cost & governance
+    GET    /costs?top=10                              R  estimated monthly cost, by provider / type, waste
+    GET    /policies                                  R
+    POST   /policies         {policy JSON}            S  add or replace a policy
+    POST   /policies/run     {name | policy, dry_run=true}   R for dry runs, S to act
+    GET    /policies/runs                             R
+  Monitoring
+    GET    /metrics                                   public, Prometheus text format
 """
 from __future__ import annotations
 
+import csv
+import io
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
@@ -72,10 +88,21 @@ from .auth import AuthService, Forbidden, Principal, Unauthorized
 from .errors import (CloudApiError, EvdcError, IncorrectState, InvalidState, NotFound, QuotaExceeded,
                      ResourceNotFound, SyncInProgress)
 from .logs import get_logger
+from .metrics import render as render_metrics
 from .models import DistributedRule, FirewallRule, NatRule, NetworkType, Quota, to_dict
+from .policy import Policy
+from .pricing import cost_report, monthly_cost
 
 log = get_logger("evdc.api")
 MAX_BODY = 1_000_000
+
+
+@dataclass
+class Raw:
+    """A non-JSON response body (CSV, Prometheus text) or JSON with extra headers."""
+    body: object
+    content_type: str = "application/json; charset=utf-8"
+    headers: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -334,9 +361,73 @@ def build_routes(app: App):
     def sync_history(c):
         return 200, store.sync_history()
 
+    def _query(q: dict):
+        return store.query(provider=q.get("provider"), status=q.get("status"), resource_type=q.get("type"),
+                           account=q.get("account"), region=q.get("region"), tag=q.get("tag"),
+                           name=q.get("name"), sort=q.get("sort", "name"), limit=int(q.get("limit", 100)),
+                           offset=int(q.get("offset", 0)))
+
     def resources(c):
-        q = c.query
-        return 200, store.list_resources(q.get("provider"), q.get("status"), q.get("type"), q.get("account"))
+        page, total = _query(c.query)
+        return 200, Raw(page, headers={"X-Total-Count": str(total)})
+
+    def resources_csv(c):
+        q = dict(c.query)
+        q.setdefault("limit", "1000")
+        page, _ = _query(q)
+        out = io.StringIO()
+        w = csv.writer(out)
+        w.writerow(["uid", "provider", "account", "region", "type", "name", "status", "vcpu", "memory_gb",
+                    "size_gb", "private_ip", "public_ip", "monthly_cost_usd", "tags"])
+        for r in page:
+            w.writerow([r.uid, r.provider, r.account, r.region, r.resource_type, r.name, r.status.value, r.vcpu,
+                        r.memory_gb, r.size_gb, r.private_ip, r.public_ip, monthly_cost(r),
+                        ";".join(f"{k}={v}" for k, v in sorted(r.tags.items()))])
+        return 200, Raw(out.getvalue(), "text/csv; charset=utf-8",
+                        {"Content-Disposition": 'attachment; filename="inventory.csv"'})
+
+    def resources_relations(c):
+        uid = c.query.get("uid")
+        if not uid:
+            raise EvdcError("uid query parameter is required")
+        rel = store.relations(uid)
+        if not rel:
+            raise NotFound(f"resource {uid} not in inventory")
+        return 200, rel
+
+    def resources_orphans(c):
+        return 200, store.orphans()
+
+    # -- cost & governance ------------------------------------------------------------------
+    def costs(c):
+        return 200, cost_report(store.list_resources(), top=int(c.query.get("top", 10)))
+
+    def policies_list(c):
+        return 200, [p.__dict__ for p in app.policies.policies.values()]
+
+    def policies_add(c):
+        system(c)
+        policy = app.policies.load([c.body])[0]
+        return 201, policy.__dict__
+
+    def policies_run(c):
+        b = c.body
+        dry_run = b.get("dry_run", True)
+        if not isinstance(dry_run, bool):
+            raise EvdcError("dry_run must be true or false")
+        if not dry_run:
+            system(c)          # anyone may preview, only the provider may act
+        if "policy" in b:
+            target = Policy.from_dict(b["policy"])
+        else:
+            target = fields(b, "name")["name"]
+        return 200, app.policies.run(target, dry_run=dry_run)
+
+    def policies_runs(c):
+        return 200, store.policy_runs()
+
+    def metrics(c):
+        return 200, Raw(render_metrics(app), "text/plain; version=0.0.4; charset=utf-8")
 
     def resources_summary(c):
         return 200, store.summary()
@@ -399,6 +490,15 @@ def build_routes(app: App):
         ("GET", r"/resources/summary", resources_summary, True),
         ("GET", r"/resources/history", resources_history, True),
         ("POST", r"/resources/(?P<action>refresh|start|stop|reboot)", resource_action, True),
+        ("GET", r"/resources\.csv", resources_csv, True),
+        ("GET", r"/resources/relations", resources_relations, True),
+        ("GET", r"/resources/orphans", resources_orphans, True),
+        ("GET", r"/costs", costs, True),
+        ("GET", r"/policies", policies_list, True),
+        ("POST", r"/policies", policies_add, True),
+        ("POST", r"/policies/run", policies_run, True),
+        ("GET", r"/policies/runs", policies_runs, True),
+        ("GET", r"/metrics", metrics, False),
     ]
 
 
@@ -420,10 +520,21 @@ def make_handler(app: App):
         server_version = "MiniEvDC/1.2"
 
         def _send(self, status: int, payload) -> None:
-            body = b"" if payload is None else json.dumps(to_dict(payload), ensure_ascii=False).encode()
+            ctype, extra = "application/json; charset=utf-8", {}
+            if isinstance(payload, Raw):
+                ctype, extra = payload.content_type, payload.headers
+                payload = payload.body
+            if payload is None:
+                body = b""
+            elif isinstance(payload, str):
+                body = payload.encode()
+            else:
+                body = json.dumps(to_dict(payload), ensure_ascii=False).encode()
             self.send_response(status)
-            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Type", ctype)
             self.send_header("Content-Length", str(len(body)))
+            for k, v in extra.items():
+                self.send_header(k, v)
             if status == 401:
                 self.send_header("WWW-Authenticate", "Bearer")
             self.end_headers()

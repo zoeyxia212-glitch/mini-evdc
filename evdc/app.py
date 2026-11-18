@@ -20,6 +20,7 @@ from .clouds.fake import FakeAliyunEcs, FakeAzure, FakeEc2
 from .core import EvdcPlatform
 from .errors import SyncInProgress
 from .manage import ResourceManager
+from .policy import DEFAULT_POLICIES, PolicyEngine
 from .retry import RetryPolicy
 from .store import Store
 from .sync import SyncScheduler, SyncService
@@ -58,6 +59,8 @@ class App:
         self.scheduler: SyncScheduler | None = None
         self._sync_lock = threading.Lock()
         self.add_account("evdc", "local", self.platform)
+        self.policies = PolicyEngine(self.store, lambda: self.manager)
+        self.policies.load(DEFAULT_POLICIES)
 
     def bootstrap_admin(self, key: str | None = None) -> str | None:
         """Create the first system admin if there is none. Returns the new key, or None if one exists."""
