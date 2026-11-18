@@ -14,15 +14,33 @@ Alibaba Cloud, AWS and Azure to it.
   policies with dry-run (find unattached disks, idle public IPs, untagged or test instances, then mark
   or stop them), a resource relationship graph, flexible queries with CSV export, Prometheus metrics.
 - **Engineering:** API keys with role-based access, SQLite persistence, change history, timeouts and
-  retries, structured JSON logs, 89 tests, CI on Python 3.10 – 3.13, Docker image.
+  retries, structured JSON logs, a web dashboard, 100 tests, CI on Python 3.10 – 3.13, Docker image.
 
 Pure Python standard library: no dependencies and no cloud account needed (realistic fake clouds are built in).
 
 ```
 python -m evdc demo                                        # end-to-end walkthrough in the terminal
-python -m unittest discover -s tests -p "test*.py" -t .    # 89 tests
-python -m evdc serve --config accounts.example.json --sync-interval 300   # REST API on :8080
+python -m unittest discover -s tests -p "test*.py" -t .    # 100 tests
+python -m evdc serve --config accounts.example.json --sync-interval 300   # API + dashboard on :8080
 ```
+
+Then open http://127.0.0.1:8080 and sign in with the admin key printed on first start
+(or the one you set in `EVDC_ADMIN_KEY`). To use a real AWS account instead of the built-in
+fakes, see [docs/AWS.md](docs/AWS.md).
+
+## Dashboard
+
+A single page served by the API itself (`GET /`), no build step and no external assets:
+
+- headline numbers: resources, running capacity, estimated monthly cost, waste
+- monthly cost by provider, resources by provider and type
+- inventory with filters (provider, type, status, tag, name), sorting, paging and CSV export
+- a detail drawer per resource: fields, relations, change history and, for system admins,
+  refresh / start / stop / reboot
+- governance policies with **Preview** (dry run) and **Apply**, the waste list and sync history
+- follows the system light / dark setting; the API key is kept only in the browser
+
+![Dashboard](docs/dashboard.png)
 
 ## Architecture
 
@@ -184,6 +202,8 @@ evdc/
   pricing.py     monthly cost estimates + waste report
   policy.py      governance policies: filters, actions, dry run
   metrics.py     Prometheus text format
+  web/dashboard.html  the dashboard (vanilla HTML/CSS/JS, served at GET /)
+  clouds/awsreal.py   real AWS client (boto3) with error translation
   retry.py       timeout + backoff + retry
   sync.py        sync engine + scheduler
   manage.py      refresh / start / stop / reboot any instance by uid
@@ -192,17 +212,23 @@ evdc/
   logs.py        JSON logging
   app.py         config → clients → adapters; wiring
   api.py         REST API (http.server)
-tests/           89 unittest cases
+docs/AWS.md      running against a real AWS account
+tests/           100 unittest cases
 .github/workflows/tests.yml   CI on Python 3.10 – 3.13
 Dockerfile       non-root image, data volume, scheduled sync
 ```
 
 ## Using real clouds
 
-The fake clients use the same method names and response shapes as the real SDK calls, so a real
-client only needs a thin wrapper that also translates SDK exceptions into `ThrottledError` /
-`TransientError` / `AuthError` / `ResourceNotFound` / `IncorrectState`, so the retry policy and the
-API know what to do. Example for AWS:
+**AWS is ready to use:** `evdc/clouds/awsreal.py` wraps boto3 and is picked automatically for an
+account with `"fake": false` (see `accounts.aws.json` and the step-by-step guide in
+[docs/AWS.md](docs/AWS.md), including a least-privilege IAM policy). It translates boto3 errors
+into Mini EvDC's error types so throttling and 5xx are retried, auth failures are not, and
+not-found / wrong-state errors become 404 / 409. It only exposes the eight EC2 calls the adapter
+needs. The tests exercise it with botocore-shaped errors, so they run without boto3 or an account.
+
+For Alibaba Cloud and Azure the fake clients use the real SDK method names and response shapes,
+so a real client is the same kind of thin wrapper. The AWS one, simplified:
 
 ```python
 import boto3

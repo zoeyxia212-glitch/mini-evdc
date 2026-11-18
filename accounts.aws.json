@@ -1,0 +1,17 @@
+{
+  "accounts": [
+    {
+      "provider": "aws",
+      "account": "my-aws",
+      "fake": false,
+      "page_size": 50,
+      "credentials": {
+        "region": "ap-southeast-2",
+        "profile": "env:AWS_PROFILE?",
+        "access_key": "env:AWS_ACCESS_KEY_ID?",
+        "secret_key": "env:AWS_SECRET_ACCESS_KEY?"
+      },
+      "retry": {"max_attempts": 4, "base_delay": 1.0, "timeout": 20}
+    }
+  ]
+}

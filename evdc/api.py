@@ -70,8 +70,9 @@ Access: S = system_admin only, T = tenant (org_admin / viewer of the owning org,
     POST   /policies         {policy JSON}            S  add or replace a policy
     POST   /policies/run     {name | policy, dry_run=true}   R for dry runs, S to act
     GET    /policies/runs                             R
-  Monitoring
+  Monitoring & UI
     GET    /metrics                                   public, Prometheus text format
+    GET    / or /dashboard                            public page; it asks for an API key and calls the API
 """
 from __future__ import annotations
 
@@ -80,6 +81,7 @@ import io
 import json
 import re
 from dataclasses import dataclass, field
+from pathlib import Path
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
@@ -426,6 +428,13 @@ def build_routes(app: App):
     def policies_runs(c):
         return 200, store.policy_runs()
 
+    def dashboard(c):
+        html = (Path(__file__).parent / "web" / "dashboard.html").read_text(encoding="utf-8")
+        return 200, Raw(html, "text/html; charset=utf-8",
+                        {"Content-Security-Policy": "default-src 'self'; script-src 'unsafe-inline'; "
+                                                    "style-src 'unsafe-inline'; img-src data:; frame-ancestors 'none'",
+                         "Cache-Control": "no-store"})
+
     def metrics(c):
         return 200, Raw(render_metrics(app), "text/plain; version=0.0.4; charset=utf-8")
 
@@ -499,6 +508,7 @@ def build_routes(app: App):
         ("POST", r"/policies/run", policies_run, True),
         ("GET", r"/policies/runs", policies_runs, True),
         ("GET", r"/metrics", metrics, False),
+        ("GET", r"/(?:dashboard)?", dashboard, False),
     ]
 
 
@@ -535,6 +545,7 @@ def make_handler(app: App):
             self.send_header("Content-Length", str(len(body)))
             for k, v in extra.items():
                 self.send_header(k, v)
+            self.send_header("X-Content-Type-Options", "nosniff")
             if status == 401:
                 self.send_header("WWW-Authenticate", "Bearer")
             self.end_headers()

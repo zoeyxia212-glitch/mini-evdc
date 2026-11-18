@@ -213,6 +213,15 @@ class GovernanceApiTests(unittest.TestCase):
         self.assertEqual(self.get("/policies/run", key=key, method="POST",
                                   body={"name": "idle-public-ips", "dry_run": False})[0], 403)
 
+    def test_dashboard_served_without_key(self):
+        for path in ("/", "/dashboard"):
+            s, h, body = self.get(path, key=None)
+            self.assertEqual(s, 200)
+            self.assertTrue(h["Content-Type"].startswith("text/html"))
+            self.assertIn("frame-ancestors 'none'", h["Content-Security-Policy"])
+            self.assertIn("Mini EvDC", body)
+            self.assertNotIn(self.key, body)   # the page never embeds credentials
+
     def test_metrics_public_prometheus_text(self):
         s, h, body = self.get("/metrics", key=None)
         self.assertEqual(s, 200)

@@ -27,9 +27,12 @@ from .sync import SyncScheduler, SyncService
 
 
 def resolve(value: Any) -> Any:
+    """Replace "env:NAME" with the variable's value. "env:NAME?" is optional (None if unset)."""
     if isinstance(value, str) and value.startswith("env:"):
-        name = value[4:]
+        name, optional = value[4:].rstrip("?"), value.endswith("?")
         if name not in os.environ:
+            if optional:
+                return None
             raise KeyError(f"environment variable {name} is not set")
         return os.environ[name]
     if isinstance(value, dict):
@@ -83,6 +86,9 @@ class App:
                 client = FAKE_FACTORIES[provider](creds)
             elif provider in CLIENT_FACTORIES:
                 client = CLIENT_FACTORIES[provider](creds)
+            elif provider == "aws":
+                from .clouds.awsreal import factory   # needs boto3: pip install "mini-evdc[aws]"
+                client = factory(creds)
             else:
                 raise NotImplementedError(f"no real client factory registered for {provider}")
             options = {k: v for k, v in acc.items() if k in ("page_size", "retry", "region")}

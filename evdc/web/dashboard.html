@@ -1,0 +1,400 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mini EvDC – Multi-cloud dashboard</title>
+<link rel="icon" href="data:,">
+<style>
+  :root {
+    color-scheme: light;
+    --surface-0: #f3f3f1; --surface-1: #fcfcfb; --border: #e2e1dc;
+    --text-primary: #0b0b0b; --text-secondary: #52514e; --text-muted: #7c7b76;
+    --grid: #ecebe7; --accent: #2a78d6;
+    /* categorical, fixed order: aliyun, aws, azure, evdc */
+    --s-aliyun: #2a78d6; --s-aws: #eb6834; --s-azure: #1baf7a; --s-evdc: #eda100;
+    /* status, reserved */
+    --good: #0ca30c; --warning: #fab219; --serious: #ec835a; --critical: #d03b3b;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      color-scheme: dark;
+      --surface-0: #111110; --surface-1: #1a1a19; --border: #2e2e2c;
+      --text-primary: #f0efec; --text-secondary: #c3c2b7; --text-muted: #8f8e86;
+      --grid: #2a2a28; --accent: #3987e5;
+      --s-aliyun: #3987e5; --s-aws: #d95926; --s-azure: #199e70; --s-evdc: #c98500;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
+         background: var(--surface-0); color: var(--text-primary); }
+  header { display: flex; gap: 12px; align-items: center; padding: 14px 24px;
+           background: var(--surface-1); border-bottom: 1px solid var(--border); flex-wrap: wrap; }
+  header h1 { font-size: 17px; margin: 0 12px 0 0; }
+  header .sub { color: var(--text-muted); font-size: 12px; }
+  header .spacer { flex: 1; }
+  input, select, button { font: inherit; color: inherit; }
+  input, select { background: var(--surface-0); border: 1px solid var(--border); border-radius: 6px; padding: 5px 8px; }
+  button { background: var(--surface-1); border: 1px solid var(--border); border-radius: 6px; padding: 5px 12px; cursor: pointer; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button.danger { color: var(--critical); }
+  button:disabled { opacity: .5; cursor: default; }
+  main { padding: 20px 24px 40px; display: grid; gap: 16px; grid-template-columns: repeat(12, 1fr); max-width: 1400px; margin: 0 auto; }
+  .card { background: var(--surface-1); border: 1px solid var(--border); border-radius: 10px; padding: 16px; min-width: 0; }
+  .card h2 { font-size: 13px; font-weight: 600; margin: 0 0 12px; color: var(--text-secondary); text-transform: uppercase; letter-spacing: .04em; }
+  .kpi { grid-column: span 3; }
+  .kpi .value { font-size: 28px; font-weight: 650; font-variant-numeric: tabular-nums; }
+  .kpi .note { color: var(--text-muted); font-size: 12px; }
+  .span-5 { grid-column: span 5; } .span-7 { grid-column: span 7; } .span-12 { grid-column: span 12; }
+  .span-6 { grid-column: span 6; }
+  @media (max-width: 1000px) { .kpi { grid-column: span 6; } .span-5, .span-7, .span-6 { grid-column: span 12; } }
+  /* bars */
+  .bars { display: grid; gap: 10px; }
+  .bar-row { display: grid; grid-template-columns: 70px 1fr 90px; gap: 10px; align-items: center; }
+  .bar-row .label { color: var(--text-secondary); }
+  .bar-row .val { text-align: right; font-variant-numeric: tabular-nums; }
+  .track { height: 18px; position: relative; border-left: 1px solid var(--text-muted); }
+  .fill { height: 100%; border-radius: 0 4px 4px 0; min-width: 2px; }
+  .legend { display: flex; gap: 14px; flex-wrap: wrap; font-size: 12px; color: var(--text-secondary); margin-top: 10px; }
+  .swatch { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 5px; vertical-align: -1px; }
+  /* tables */
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th { text-align: left; color: var(--text-muted); font-weight: 500; padding: 6px 8px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+  td { padding: 6px 8px; border-bottom: 1px solid var(--grid); vertical-align: top; }
+  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+  tbody tr.click { cursor: pointer; }
+  tbody tr.click:hover { background: var(--surface-0); }
+  .filters { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; align-items: center; }
+  .pager { display: flex; gap: 8px; align-items: center; justify-content: flex-end; margin-top: 8px; color: var(--text-muted); font-size: 12px; }
+  .pill { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; white-space: nowrap; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+  .muted { color: var(--text-muted); }
+  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+  .tag { display: inline-block; background: var(--surface-0); border: 1px solid var(--border); border-radius: 4px; padding: 0 5px; margin: 0 3px 3px 0; font-size: 11px; }
+  /* drawer */
+  #drawer { position: fixed; top: 0; right: 0; width: min(480px, 100vw); height: 100vh; background: var(--surface-1);
+            border-left: 1px solid var(--border); box-shadow: -8px 0 24px rgba(0,0,0,.12); padding: 18px; overflow: auto;
+            transform: translateX(100%); transition: transform .18s ease; z-index: 10; }
+  #drawer.open { transform: none; }
+  #drawer h3 { margin: 0 0 4px; font-size: 16px; word-break: break-all; }
+  #drawer h4 { margin: 18px 0 6px; font-size: 12px; color: var(--text-secondary); text-transform: uppercase; letter-spacing: .04em; }
+  dl { display: grid; grid-template-columns: 110px 1fr; gap: 4px 10px; margin: 10px 0 0; }
+  dt { color: var(--text-muted); } dd { margin: 0; word-break: break-all; }
+  #toast { position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%); background: var(--text-primary); color: var(--surface-1);
+           padding: 8px 14px; border-radius: 8px; font-size: 13px; opacity: 0; transition: opacity .2s; pointer-events: none; z-index: 20; }
+  #toast.show { opacity: 1; }
+  #tip { position: fixed; pointer-events: none; background: var(--surface-1); border: 1px solid var(--border); border-radius: 6px;
+         padding: 6px 9px; font-size: 12px; box-shadow: 0 4px 14px rgba(0,0,0,.12); display: none; z-index: 30; }
+  .empty { color: var(--text-muted); padding: 10px 0; }
+  #login { max-width: 460px; margin: 80px auto; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Mini EvDC</h1>
+  <span class="sub" id="who">multi-cloud inventory</span>
+  <span class="spacer"></span>
+  <span class="sub" id="last-sync"></span>
+  <button class="primary" id="btn-sync">Sync now</button>
+  <button id="btn-logout">Sign out</button>
+</header>
+
+<section id="login" class="card" hidden>
+  <h2>Sign in</h2>
+  <p class="muted">Paste your Mini EvDC API key. It is kept only in this browser.</p>
+  <form id="login-form" class="filters">
+    <input id="key" type="password" placeholder="evdc_…" autocomplete="off" style="flex:1" required>
+    <button class="primary" type="submit">Sign in</button>
+  </form>
+  <p id="login-error" class="muted"></p>
+</section>
+
+<main id="app" hidden>
+  <div class="card kpi"><h2>Resources</h2><div class="value" id="k-total">–</div><div class="note" id="k-types"></div></div>
+  <div class="card kpi"><h2>Running capacity</h2><div class="value" id="k-cpu">–</div><div class="note" id="k-mem"></div></div>
+  <div class="card kpi"><h2>Est. monthly cost</h2><div class="value" id="k-cost">–</div><div class="note">illustrative prices, USD</div></div>
+  <div class="card kpi"><h2>Waste / month</h2><div class="value" id="k-waste">–</div><div class="note" id="k-waste-n"></div></div>
+
+  <div class="card span-5">
+    <h2>Monthly cost by provider</h2>
+    <div class="bars" id="cost-bars"></div>
+    <details style="margin-top:10px"><summary class="muted">Table view</summary><table id="cost-table"></table></details>
+  </div>
+  <div class="card span-7">
+    <h2>Resources by provider and type</h2>
+    <table id="mix-table"></table>
+  </div>
+
+  <div class="card span-12">
+    <h2>Inventory</h2>
+    <div class="filters">
+      <select id="f-provider"><option value="">All providers</option></select>
+      <select id="f-type"><option value="">All types</option><option>instance</option><option>disk</option><option>vpc</option><option>eip</option></select>
+      <select id="f-status"><option value="">Any status</option><option>running</option><option>stopped</option><option>pending</option><option>stopping</option><option>available</option><option>in_use</option><option>deleted</option></select>
+      <input id="f-tag" placeholder="tag e.g. env:prod" size="14">
+      <input id="f-name" placeholder="name contains" size="14">
+      <select id="f-sort">
+        <option value="name">Sort: name</option><option value="-vcpu">vCPU (high first)</option>
+        <option value="-memory_gb">Memory (high first)</option><option value="-size_gb">Disk size (high first)</option>
+        <option value="-synced_at">Recently synced</option>
+      </select>
+      <button id="btn-csv">Export CSV</button>
+    </div>
+    <div style="overflow:auto"><table id="inv-table"></table></div>
+    <div class="pager"><span id="inv-count"></span><button id="pg-prev">Previous</button><button id="pg-next">Next</button></div>
+  </div>
+
+  <div class="card span-7">
+    <h2>Governance policies</h2>
+    <table id="pol-table"></table>
+    <div id="pol-result" style="margin-top:12px"></div>
+  </div>
+  <div class="card span-5">
+    <h2>Waste</h2>
+    <table id="waste-table"></table>
+  </div>
+
+  <div class="card span-12">
+    <h2>Sync history</h2>
+    <table id="sync-table"></table>
+  </div>
+</main>
+
+<aside id="drawer" aria-label="Resource details">
+  <div style="display:flex;justify-content:space-between;gap:10px">
+    <div><div class="muted" id="d-kind"></div><h3 id="d-name"></h3></div>
+    <button id="d-close" aria-label="Close">✕</button>
+  </div>
+  <div id="d-actions" class="filters" style="margin-top:12px"></div>
+  <dl id="d-fields"></dl>
+  <h4>Relations</h4><div id="d-rel"></div>
+  <h4>Change history</h4><div id="d-hist"></div>
+</aside>
+<div id="toast" role="status"></div>
+<div id="tip"></div>
+
+<script>
+"use strict";
+const PROVIDERS = ["aliyun", "aws", "azure", "evdc"];           // fixed colour order
+const PROVIDER_NAME = {aliyun: "Alibaba", aws: "AWS", azure: "Azure", evdc: "EvDC"};
+const STATUS = {running: "good", in_use: "good", available: "warning", pending: "warning",
+                stopping: "warning", stopped: "serious", deleted: "critical", unknown: "serious"};
+const PAGE = 15;
+const state = {offset: 0, total: 0, me: null};
+
+const $ = (id) => document.getElementById(id);
+const esc = (v) => String(v ?? "").replace(/[&<>"']/g, (c) => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"}[c]));
+const money = (n) => "$" + Number(n || 0).toLocaleString(undefined, {maximumFractionDigits: 0});
+const money2 = (n) => "$" + Number(n || 0).toFixed(2);
+
+function getKey() { try { return localStorage.getItem("evdc_key"); } catch { return state.memKey; } }
+function setKey(k) { state.memKey = k; try { k ? localStorage.setItem("evdc_key", k) : localStorage.removeItem("evdc_key"); } catch {} }
+
+function toast(msg) { const t = $("toast"); t.textContent = msg; t.classList.add("show"); clearTimeout(t._h); t._h = setTimeout(() => t.classList.remove("show"), 2600); }
+
+async function api(path, opts = {}) {
+  const res = await fetch(path, {...opts, headers: {"Authorization": "Bearer " + getKey(), "Content-Type": "application/json", ...(opts.headers || {})}});
+  if (res.status === 401) { showLogin("Your key was rejected. Sign in again."); throw new Error("unauthorized"); }
+  const text = await res.text();
+  const body = text ? JSON.parse(text) : null;
+  if (!res.ok) throw new Error(body && body.error ? body.error : res.statusText);
+  return {body, headers: res.headers, status: res.status};
+}
+
+function statusPill(s) {
+  const role = STATUS[s] || "serious";
+  return `<span class="pill"><span class="dot" style="background:var(--${role})"></span>${esc(s)}</span>`;
+}
+function providerPill(p) {
+  return `<span class="pill"><span class="swatch" style="background:var(--s-${esc(p)})"></span>${esc(PROVIDER_NAME[p] || p)}</span>`;
+}
+
+/* ---------- tooltip for bars ---------- */
+const tip = $("tip");
+function bindTip(el, html) {
+  el.addEventListener("mousemove", (e) => { tip.innerHTML = html; tip.style.display = "block";
+    tip.style.left = Math.min(e.clientX + 12, innerWidth - tip.offsetWidth - 8) + "px"; tip.style.top = (e.clientY + 12) + "px"; });
+  el.addEventListener("mouseleave", () => { tip.style.display = "none"; });
+}
+
+/* ---------- overview ---------- */
+async function loadOverview() {
+  const [{body: sum}, {body: cost}] = await Promise.all([api("/resources/summary"), api("/costs?top=5")]);
+  $("k-total").textContent = sum.total.toLocaleString();
+  $("k-types").textContent = Object.entries(sum.by_type).map(([t, n]) => `${n} ${t}`).join(" · ");
+  $("k-cpu").textContent = `${sum.running_vcpu} vCPU`;
+  $("k-mem").textContent = `${sum.running_memory_gb} GB memory · ${Math.round(sum.disk_gb).toLocaleString()} GB disk`;
+  $("k-cost").textContent = money(cost.total_monthly);
+  $("k-waste").textContent = money(cost.waste_monthly);
+  $("k-waste-n").textContent = `${cost.waste.length} idle disks / public IPs`;
+
+  const max = Math.max(1, ...Object.values(cost.by_provider));
+  const rows = PROVIDERS.filter((p) => p in cost.by_provider);
+  const bars = $("cost-bars"); bars.innerHTML = "";
+  for (const p of rows) {
+    const v = cost.by_provider[p];
+    const row = document.createElement("div"); row.className = "bar-row";
+    row.innerHTML = `<span class="label">${esc(PROVIDER_NAME[p])}</span>
+      <div class="track"><div class="fill" style="width:${(v / max * 100).toFixed(1)}%;background:var(--s-${p})"></div></div>
+      <span class="val">${money(v)}</span>`;
+    bindTip(row, `<b>${esc(PROVIDER_NAME[p])}</b><br>${money2(v)} / month<br>${(v / cost.total_monthly * 100).toFixed(1)}% of total`);
+    bars.appendChild(row);
+  }
+  $("cost-table").innerHTML = `<thead><tr><th>Provider</th><th class="num">USD / month</th></tr></thead><tbody>` +
+    rows.map((p) => `<tr><td>${esc(PROVIDER_NAME[p])}</td><td class="num">${money2(cost.by_provider[p])}</td></tr>`).join("") + "</tbody>";
+
+  const types = ["instance", "disk", "vpc", "eip"];
+  const provs = PROVIDERS.filter((p) => p in sum.by_provider);
+  $("mix-table").innerHTML = `<thead><tr><th>Provider</th>${types.map((t) => `<th class="num">${t}</th>`).join("")}<th class="num">total</th></tr></thead><tbody>` +
+    provs.map((p) => { const d = sum.by_provider[p];
+      const n = (t) => Object.values(d[t] || {}).reduce((a, b) => a + b, 0);
+      const run = (d.instance || {}).running || 0;
+      return `<tr><td>${providerPill(p)}</td>${types.map((t) => `<td class="num">${n(t) || "–"}${t === "instance" && n(t) ? ` <span class="muted">(${run} running)</span>` : ""}</td>`).join("")}<td class="num"><b>${d.total}</b></td></tr>`; }).join("") + "</tbody>";
+
+  const sel = $("f-provider");
+  if (sel.options.length === 1) for (const p of provs) sel.add(new Option(PROVIDER_NAME[p], p));
+
+  $("waste-table").innerHTML = cost.waste.length
+    ? `<thead><tr><th>Resource</th><th>Why</th><th class="num">/ month</th></tr></thead><tbody>` +
+      cost.waste.slice(0, 12).map((w) => `<tr class="click" data-uid="${esc(w.uid)}"><td>${providerPill(w.provider)} ${esc(w.name)}</td><td class="muted">${esc(w.reason)}</td><td class="num">${money2(w.monthly_cost)}</td></tr>`).join("") + "</tbody>"
+    : `<tbody><tr><td class="empty">Nothing idle. Nice.</td></tr></tbody>`;
+}
+
+/* ---------- inventory ---------- */
+function invQuery(extra = {}) {
+  const q = new URLSearchParams();
+  const v = (id) => $(id).value.trim();
+  if (v("f-provider")) q.set("provider", v("f-provider"));
+  if (v("f-type")) q.set("type", v("f-type"));
+  if (v("f-status")) q.set("status", v("f-status"));
+  if (v("f-tag")) q.set("tag", v("f-tag"));
+  if (v("f-name")) q.set("name", v("f-name"));
+  q.set("sort", v("f-sort"));
+  for (const [k, val] of Object.entries(extra)) q.set(k, val);
+  return q;
+}
+async function loadInventory() {
+  const {body, headers} = await api("/resources?" + invQuery({limit: PAGE, offset: state.offset}));
+  state.total = Number(headers.get("X-Total-Count") || body.length);
+  const detail = (r) => r.resource_type === "instance" ? `${r.vcpu ?? "?"} vCPU · ${r.memory_gb ?? "?"} GB`
+    : r.resource_type === "disk" ? `${r.size_gb} GB ${esc(r.attributes.category || "")}`
+    : r.resource_type === "vpc" ? esc(r.attributes.cidr || "") : esc(r.public_ip || "");
+  $("inv-table").innerHTML = `<thead><tr><th>Provider</th><th>Type</th><th>Name</th><th>Status</th><th>Size / address</th><th>Region</th><th>Tags</th></tr></thead><tbody>` +
+    (body.length ? body.map((r) => `<tr class="click" data-uid="${esc(r.uid)}"><td>${providerPill(r.provider)}</td><td>${esc(r.resource_type)}</td>
+      <td>${esc(r.name)}</td><td>${statusPill(r.status)}</td><td>${detail(r)}</td><td class="muted">${esc(r.region)}</td>
+      <td>${Object.entries(r.tags).map(([k, v]) => `<span class="tag">${esc(k)}=${esc(v)}</span>`).join("")}</td></tr>`).join("")
+      : `<tr><td colspan="7" class="empty">No resources match these filters.</td></tr>`) + "</tbody>";
+  const from = state.total ? state.offset + 1 : 0;
+  $("inv-count").textContent = `${from}–${Math.min(state.offset + PAGE, state.total)} of ${state.total}`;
+  $("pg-prev").disabled = state.offset === 0;
+  $("pg-next").disabled = state.offset + PAGE >= state.total;
+}
+
+/* ---------- drawer ---------- */
+async function openDrawer(uid) {
+  const [{body: list}, {body: rel}, {body: hist}] = await Promise.all([
+    api("/resources?" + new URLSearchParams({limit: 1000})), api("/resources/relations?uid=" + encodeURIComponent(uid)),
+    api("/resources/history?limit=20&uid=" + encodeURIComponent(uid))]);
+  const r = list.find((x) => x.uid === uid);
+  if (!r) return toast("Resource not found");
+  $("d-kind").innerHTML = `${providerPill(r.provider)} · ${esc(r.resource_type)}`;
+  $("d-name").textContent = r.name;
+  const fields = {uid: r.uid, status: null, account: r.account, region: r.region, vcpu: r.vcpu, memory_gb: r.memory_gb,
+    size_gb: r.size_gb, private_ip: r.private_ip, public_ip: r.public_ip, synced: r.synced_at,
+    ...Object.fromEntries(Object.entries(r.attributes).map(([k, v]) => [k, Array.isArray(v) ? v.join(", ") : v]))};
+  $("d-fields").innerHTML = Object.entries(fields).filter(([k, v]) => k === "status" || (v !== null && v !== undefined && v !== ""))
+    .map(([k, v]) => `<dt>${esc(k)}</dt><dd>${k === "status" ? statusPill(r.status) : esc(v)}</dd>`).join("");
+  const acts = $("d-actions"); acts.innerHTML = "";
+  if (r.resource_type === "instance" && r.status !== "deleted" && state.me && state.me.role === "system_admin") {
+    for (const a of ["refresh", "start", "stop", "reboot"]) {
+      const b = document.createElement("button"); b.textContent = a[0].toUpperCase() + a.slice(1);
+      if (a === "stop") b.className = "danger";
+      b.onclick = async () => {
+        if (a !== "refresh" && !confirm(`${a} ${r.name} on ${PROVIDER_NAME[r.provider]}?`)) return;
+        try { await api("/resources/" + a, {method: "POST", body: JSON.stringify({uid})}); toast(`${a}: sent`); await Promise.all([openDrawer(uid), loadInventory(), loadOverview()]); }
+        catch (e) { toast(e.message); }
+      };
+      acts.appendChild(b);
+    }
+  }
+  $("d-rel").innerHTML = rel.edges.length ? `<table><tbody>${rel.edges.map((e) => `<tr class="click" data-uid="${esc(e.uid)}"><td class="muted">${esc(e.relation)}</td><td>${esc(e.name)}</td><td>${statusPill(e.status)}</td></tr>`).join("")}</tbody></table>`
+    : `<div class="empty">No linked resources.</div>`;
+  $("d-hist").innerHTML = hist.length ? `<table><tbody>${hist.map((h) => `<tr><td class="muted mono">${esc(h.ts.replace("T", " ").slice(0, 19))}</td><td>${esc(h.kind)}</td><td class="mono">${esc(JSON.stringify(h.detail))}</td></tr>`).join("")}</tbody></table>`
+    : `<div class="empty">No history yet.</div>`;
+  $("drawer").classList.add("open");
+}
+
+/* ---------- policies + sync ---------- */
+async function loadPolicies() {
+  const {body} = await api("/policies");
+  const canAct = state.me && state.me.role === "system_admin";
+  $("pol-table").innerHTML = `<thead><tr><th>Policy</th><th>Resource</th><th>What it looks for</th><th></th></tr></thead><tbody>` +
+    body.map((p) => `<tr><td><b>${esc(p.name)}</b></td><td>${esc(p.resource)}</td><td class="muted">${esc(p.description)}</td>
+      <td style="white-space:nowrap"><button data-pol="${esc(p.name)}" data-dry="1">Preview</button>
+      ${canAct && p.actions.some((a) => a !== "report") ? `<button data-pol="${esc(p.name)}" data-dry="0" class="danger">Apply</button>` : ""}</td></tr>`).join("") + "</tbody>";
+}
+async function runPolicy(name, dry) {
+  if (!dry && !confirm(`Apply policy ${name}? This will change resources.`)) return;
+  try {
+    const {body: r} = await api("/policies/run", {method: "POST", body: JSON.stringify({name, dry_run: dry})});
+    $("pol-result").innerHTML = `<p><b>${esc(r.policy)}</b> ${r.dry_run ? "(preview)" : "(applied)"}: ${r.matched} of ${r.scanned} matched · ${money2(r.monthly_cost_of_matches)} / month</p>` +
+      (r.results.length ? `<table><thead><tr><th>Resource</th><th>Status</th><th class="num">/ month</th><th>Actions</th></tr></thead><tbody>` +
+        r.results.slice(0, 10).map((x) => `<tr class="click" data-uid="${esc(x.uid)}"><td>${providerPill(x.provider)} ${esc(x.name)}</td><td>${statusPill(x.status)}</td><td class="num">${money2(x.monthly_cost)}</td><td class="muted">${esc(x.actions.join(", ") || "report")}</td></tr>`).join("") +
+        `</tbody></table>${r.results.length > 10 ? `<p class="muted">…and ${r.results.length - 10} more</p>` : ""}` : "");
+    if (!dry) await Promise.all([loadInventory(), loadOverview()]);
+  } catch (e) { toast(e.message); }
+}
+async function loadSyncHistory() {
+  const {body} = await api("/sync/history");
+  const latest = body[0];
+  $("last-sync").textContent = latest ? `last sync ${latest.finished_at.replace("T", " ").slice(0, 16)} UTC` : "never synced";
+  $("sync-table").innerHTML = body.length ? `<thead><tr><th>Finished (UTC)</th><th>Provider</th><th>Account</th><th>Result</th><th class="num">Created</th><th class="num">Updated</th><th class="num">Deleted</th><th>Error</th></tr></thead><tbody>` +
+    body.slice(0, 12).map((s) => `<tr><td class="mono">${esc(s.finished_at.replace("T", " ").slice(0, 19))}</td><td>${providerPill(s.provider)}</td><td>${esc(s.account)}</td>
+      <td><span class="pill"><span class="dot" style="background:var(--${s.status === "success" ? "good" : "critical"})"></span>${esc(s.status)}</span></td>
+      <td class="num">${s.created}</td><td class="num">${s.updated}</td><td class="num">${s.deleted}</td><td class="muted">${esc(s.error || "")}</td></tr>`).join("") + "</tbody>"
+    : `<tbody><tr><td class="empty">No syncs yet. Press “Sync now”.</td></tr></tbody>`;
+}
+
+/* ---------- wiring ---------- */
+function showLogin(msg) { $("app").hidden = true; $("login").hidden = false; $("login-error").textContent = msg || ""; $("drawer").classList.remove("open"); }
+async function start() {
+  if (!getKey()) return showLogin();
+  try { state.me = (await api("/me")).body; } catch (e) { return; }
+  $("who").textContent = `${state.me.name} · ${state.me.role.replace("_", " ")}`;
+  $("btn-sync").hidden = state.me.role !== "system_admin";
+  $("login").hidden = true; $("app").hidden = false;
+  await Promise.all([loadOverview(), loadInventory(), loadPolicies(), loadSyncHistory()]).catch((e) => toast(e.message));
+}
+
+$("login-form").onsubmit = (e) => { e.preventDefault(); setKey($("key").value.trim()); $("key").value = ""; start(); };
+$("btn-logout").onclick = () => { setKey(null); showLogin(); };
+$("btn-sync").onclick = async (e) => {
+  e.target.disabled = true; e.target.textContent = "Syncing…";
+  try { const {body} = await api("/sync", {method: "POST"}); const bad = body.filter((r) => r.status !== "success");
+        toast(bad.length ? `${bad.length} account(s) failed` : "Sync finished"); await Promise.all([loadOverview(), loadInventory(), loadSyncHistory()]); }
+  catch (err) { toast(err.message); }
+  finally { e.target.disabled = false; e.target.textContent = "Sync now"; }
+};
+let timer;
+for (const id of ["f-provider", "f-type", "f-status", "f-sort"]) $(id).onchange = () => { state.offset = 0; loadInventory(); };
+for (const id of ["f-tag", "f-name"]) $(id).oninput = () => { clearTimeout(timer); timer = setTimeout(() => { state.offset = 0; loadInventory(); }, 250); };
+$("pg-prev").onclick = () => { state.offset = Math.max(0, state.offset - PAGE); loadInventory(); };
+$("pg-next").onclick = () => { state.offset += PAGE; loadInventory(); };
+$("btn-csv").onclick = async () => {
+  const res = await fetch("/resources.csv?" + invQuery({limit: 1000}), {headers: {"Authorization": "Bearer " + getKey()}});
+  if (!res.ok) return toast("Export failed");
+  const url = URL.createObjectURL(await res.blob()); const a = document.createElement("a");
+  a.href = url; a.download = "inventory.csv"; a.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
+};
+document.addEventListener("click", (e) => {
+  const pol = e.target.closest("button[data-pol]");
+  if (pol) return runPolicy(pol.dataset.pol, pol.dataset.dry === "1");
+  const row = e.target.closest("tr[data-uid]");
+  if (row) openDrawer(row.dataset.uid).catch((err) => toast(err.message));
+});
+$("d-close").onclick = () => $("drawer").classList.remove("open");
+document.addEventListener("keydown", (e) => { if (e.key === "Escape") $("drawer").classList.remove("open"); });
+start();
+</script>
+</body>
+</html>
