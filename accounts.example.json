@@ -1,0 +1,27 @@
+{
+  "accounts": [
+    {
+      "provider": "aliyun",
+      "account": "ali-prod",
+      "fake": true,
+      "region": "cn-hangzhou",
+      "page_size": 10,
+      "credentials": {"access_key_id": "env:ALIYUN_AK", "access_key_secret": "env:ALIYUN_SK"},
+      "retry": {"max_attempts": 4, "base_delay": 0.5, "timeout": 10}
+    },
+    {
+      "provider": "aws",
+      "account": "aws-syd",
+      "fake": true,
+      "page_size": 5,
+      "credentials": {"access_key": "env:AWS_AK", "secret_key": "env:AWS_SK", "region": "ap-southeast-2"}
+    },
+    {
+      "provider": "azure",
+      "account": "az-au",
+      "fake": true,
+      "page_size": 5,
+      "credentials": {"tenant_id": "env:AZ_TENANT", "client_id": "env:AZ_CLIENT", "client_secret": "env:AZ_SECRET"}
+    }
+  ]
+}
