@@ -13,7 +13,13 @@ ENV PYTHONUNBUFFERED=1 \
 WORKDIR /app
 COPY pyproject.toml README.md ./
 COPY evdc ./evdc
-RUN pip install . \
+# Pull in Debian security fixes released after the base image was built (e.g. zlib CVE-2026-85091)
+RUN apt-get update \
+    && apt-get upgrade -y --no-install-recommends \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN pip install --upgrade pip setuptools \
+    && pip install . \
     && useradd --create-home --uid 10001 evdc \
     && mkdir /data && chown evdc /data
 
