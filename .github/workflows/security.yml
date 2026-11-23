@@ -15,8 +15,8 @@ jobs:
     name: Static analysis (bandit)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - run: pip install bandit
@@ -27,8 +27,8 @@ jobs:
     name: Dependency vulnerabilities (pip-audit)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       # audit the optional cloud SDK extras too, since production installs them
@@ -39,7 +39,7 @@ jobs:
     name: Container image scan (Trivy)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: docker build -t mini-evdc:scan .
       # Run the official Trivy image (pinned) instead of the trivy-action wrapper,
       # whose release tags were tampered with in March 2026.
