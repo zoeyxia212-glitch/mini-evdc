@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1
-FROM python:3.12-slim
+FROM python:3.15-slim
 
 LABEL org.opencontainers.image.title="Mini EvDC" \
       org.opencontainers.image.description="Enterprise virtual data center + multi-cloud integration service" \
