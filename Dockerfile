@@ -18,8 +18,15 @@ RUN apt-get update \
     && apt-get upgrade -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
-RUN pip install --upgrade pip setuptools \
+# setuptools / wheel are only needed to build the package, so remove them from the
+# runtime image (old copies get flagged by scanners, e.g. CVE-2025-47273).
+RUN pip install --upgrade pip \
     && pip install . \
+    && (pip uninstall -y setuptools wheel || true) \
+    && rm -rf /usr/local/lib/python3*/site-packages/setuptools* \
+              /usr/local/lib/python3*/site-packages/pkg_resources \
+              /usr/local/lib/python3*/site-packages/_distutils_hack \
+              /usr/local/lib/python3*/site-packages/distutils-precedence.pth \
     && useradd --create-home --uid 10001 evdc \
     && mkdir /data && chown evdc /data
 
