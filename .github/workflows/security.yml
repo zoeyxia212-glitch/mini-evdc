@@ -41,9 +41,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: docker build -t mini-evdc:scan .
-      - uses: aquasecurity/trivy-action@0.28.0
-        with:
-          image-ref: mini-evdc:scan
-          severity: CRITICAL,HIGH
-          ignore-unfixed: true
-          exit-code: "1"
+      # Run the official Trivy image (pinned) instead of the trivy-action wrapper,
+      # whose release tags were tampered with in March 2026.
+      - name: Trivy scan (fail on fixable CRITICAL / HIGH)
+        run: |
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
+            aquasec/trivy:0.57.1 image --no-progress \
+            --severity CRITICAL,HIGH --ignore-unfixed --exit-code 1 mini-evdc:scan

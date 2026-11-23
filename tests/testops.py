@@ -104,3 +104,12 @@ class GracefulShutdownTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class StoreColumnAllowListTests(unittest.TestCase):
+    def test_unknown_sync_column_is_rejected(self):
+        from evdc.store import Store
+        store = Store(":memory:")
+        with self.assertRaises(ValueError):
+            store.record_sync(provider="aws", account="a", **{"status) VALUES (1); --": "x"})
+        store.close()
