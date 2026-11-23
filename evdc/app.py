@@ -66,6 +66,7 @@ class App:
         self.adapters: list[ProviderAdapter] = []
         self.scheduler: SyncScheduler | None = None
         self._sync_lock = threading.Lock()
+        self.draining = False          # set on SIGTERM: readiness fails so load balancers stop routing here
         self.add_account("evdc", "local", self.platform)
         self.policies = PolicyEngine(self.store, lambda: self.manager)
         self.policies.load(DEFAULT_POLICIES)
@@ -118,6 +119,15 @@ class App:
     @property
     def manager(self) -> ResourceManager:
         return ResourceManager(self.store, self.adapters)
+
+    def readiness(self) -> tuple[bool, dict]:
+        """What a load balancer / Kubernetes readiness probe needs to know."""
+        checks = {
+            "database": self.store.ping(),
+            "scheduler": self.scheduler is None or self.scheduler._thread.is_alive(),
+            "accepting_traffic": not self.draining,
+        }
+        return all(checks.values()), checks
 
     def close(self) -> None:
         if self.scheduler:

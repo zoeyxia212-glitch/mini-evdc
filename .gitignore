@@ -3,3 +3,5 @@ __pycache__/
 *.db
 .env
 .ruff_cache/
+deploy/.env
+deploy/k8s/base/secrets.env

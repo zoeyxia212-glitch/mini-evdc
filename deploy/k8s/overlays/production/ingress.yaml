@@ -1,0 +1,23 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: mini-evdc
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt
+    nginx.ingress.kubernetes.io/limit-rps: "20"          # basic rate limiting at the edge
+    nginx.ingress.kubernetes.io/proxy-body-size: "1m"
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts: [evdc.example.com]
+      secretName: mini-evdc-tls
+  rules:
+    - host: evdc.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: mini-evdc
+                port: {name: http}

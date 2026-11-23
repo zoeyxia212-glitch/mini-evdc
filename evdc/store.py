@@ -114,26 +114,53 @@ class Store:
         with self._lock:
             self._conn.executescript(SCHEMA)
 
+    def ping(self) -> bool:
+        """Readiness check: can we still run a query?"""
+        try:
+            with self._lock:
+                self._conn.execute("SELECT 1").fetchone()
+            return True
+        except Exception:  # noqa: BLE001 - any failure means not ready
+            return False
+
     def close(self) -> None:
         with self._lock:
             self._conn.close()
 
     # -- resources ---------------------------------------------------------
+    # Column names are interpolated into SQL below, so they are checked against these
+    # allow-lists first; every value is always bound as a "?" parameter.
+    RESOURCE_COLUMNS = frozenset({
+        "provider", "account", "region", "native_id", "resource_type", "name", "status", "vcpu", "memory_gb",
+        "private_ip", "public_ip", "size_gb", "tags", "attributes", "synced_at",
+    })
+    SYNC_COLUMNS = frozenset({
+        "provider", "account", "started_at", "finished_at", "status", "created", "updated", "deleted", "error",
+    })
+
+    @staticmethod
+    def _checked(cols, allowed: frozenset) -> list[str]:
+        bad = [c for c in cols if c not in allowed]
+        if bad:
+            raise ValueError(f"unknown column(s): {bad}")
+        return list(cols)
+
     def upsert(self, r: CloudResource) -> str:
         """Insert or update. Returns 'created', 'updated' or 'unchanged' and logs an event."""
         new = _row_values(r)
         with self._lock:
             row = self._conn.execute("SELECT * FROM resources WHERE uid=?", (r.uid,)).fetchone()
-            cols = list(new) + ["synced_at"]
+            cols = self._checked([*new, "synced_at"], self.RESOURCE_COLUMNS)
             if row is None:
                 self._conn.execute(
-                    f"INSERT INTO resources ({', '.join(cols)}, uid) VALUES ({', '.join('?' * (len(cols) + 1))})",
+                    f"INSERT INTO resources ({', '.join(cols)}, uid) "  # nosec B608 - allow-listed columns
+                    f"VALUES ({', '.join('?' * (len(cols) + 1))})",
                     (*new.values(), r.synced_at, r.uid))
                 self._event(r.uid, "created", {"status": new["status"], "type": r.resource_type})
                 outcome = "created"
             else:
                 diff = {k: [row[k], v] for k, v in new.items() if row[k] != v}
-                self._conn.execute(f"UPDATE resources SET {', '.join(c + '=?' for c in cols)} WHERE uid=?",
+                self._conn.execute(f"UPDATE resources SET {', '.join(c + '=?' for c in cols)} WHERE uid=?",  # nosec B608
                                    (*new.values(), r.synced_at, r.uid))
                 if diff:
                     self._event(r.uid, "updated", diff)
@@ -311,10 +338,11 @@ class Store:
 
     # -- sync history ------------------------------------------------------
     def record_sync(self, **run) -> None:
-        cols = ", ".join(run)
+        cols = ", ".join(self._checked(run, self.SYNC_COLUMNS))
         marks = ", ".join("?" for _ in run)
         with self._lock:
-            self._conn.execute(f"INSERT INTO sync_runs ({cols}) VALUES ({marks})", tuple(run.values()))
+            self._conn.execute(f"INSERT INTO sync_runs ({cols}) VALUES ({marks})",  # nosec B608 - allow-listed
+                               tuple(run.values()))
             self._conn.commit()
 
     def sync_history(self, limit: int = 20) -> list[dict]:

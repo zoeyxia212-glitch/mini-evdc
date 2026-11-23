@@ -8,6 +8,8 @@ Access: S = system_admin only, T = tenant (org_admin / viewer of the owning org,
 
   Identity & users
     GET    /health                                    public
+    GET    /healthz                                   public  liveness: the process answers
+    GET    /readyz                                    public  readiness: db, scheduler, not draining (else 503)
     GET    /me                                        R
     GET    /users                                     T  (system: all users)
     POST   /users            {name, role, org_id}     T W  -> returns the new API key once
@@ -145,6 +147,13 @@ def build_routes(app: App):
     # -- identity & users ----------------------------------------------------
     def health(c):
         return 200, {"status": "ok", "accounts": [f"{a.provider}:{a.account}" for a in app.adapters]}
+
+    def healthz(c):
+        return 200, {"status": "alive"}
+
+    def readyz(c):
+        ready, checks = app.readiness()
+        return (200 if ready else 503), {"status": "ready" if ready else "not ready", "checks": checks}
 
     def me(c):
         return 200, c.who.__dict__
@@ -474,6 +483,8 @@ def build_routes(app: App):
     ID = r"(?P<{}>[\w-]+)"
     routes_table = [
         ("GET", r"/health", health, False),
+        ("GET", r"/healthz", healthz, False),
+        ("GET", r"/readyz", readyz, False),
         ("GET", r"/me", me, True),
         ("GET", r"/users", users_list, True),
         ("POST", r"/users", users_create, True),
@@ -541,7 +552,8 @@ _ACCESS = {"S": "system admin only", "T": "users of the owning org (or a system 
 
 
 SUMMARIES = {
-    "health": "Service health and configured accounts", "me": "The caller's identity and role",
+    "health": "Service health and configured accounts", "healthz": "Liveness probe",
+    "readyz": "Readiness probe", "me": "The caller's identity and role",
     "users_list": "List users", "users_create": "Create a user and return its API key once",
     "users_delete": "Delete a user", "orgs_list": "List orgs", "orgs_create": "Create an org",
     "orgs_delete": "Delete an empty org", "vdcs_list": "List an org's VDCs", "vdc_create": "Create a VDC with a quota",

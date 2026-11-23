@@ -1,6 +1,8 @@
 # Mini EvDC
 
 ![tests](https://github.com/<your-github-username>/mini-evdc/actions/workflows/tests.yml/badge.svg)
+![codeql](https://github.com/<your-github-username>/mini-evdc/actions/workflows/codeql.yml/badge.svg)
+![security](https://github.com/<your-github-username>/mini-evdc/actions/workflows/security.yml/badge.svg)
 
 A simplified, runnable re-creation of **EvDC (Enterprise Virtual Data Center)**, the enterprise cloud
 platform I worked on at VNET, together with the **multi-cloud integration service** that connected
@@ -14,13 +16,17 @@ Alibaba Cloud, AWS and Azure to it.
   policies with dry-run (find unattached disks, idle public IPs, untagged or test instances, then mark
   or stop them), a resource relationship graph, flexible queries with CSV export, Prometheus metrics.
 - **Engineering:** API keys with role-based access, SQLite persistence, change history, timeouts and
-  retries, structured JSON logs, a web dashboard, an API audit trail, an OpenAPI document, 115 tests, lint + CI on Python 3.10 – 3.13, Docker image.
+  retries, structured JSON logs, a web dashboard, an API audit trail, an OpenAPI document, 120 tests, lint + CI on Python 3.10 – 3.13.
+- **Production readiness:** liveness / readiness probes, graceful shutdown, a hardened container,
+  docker compose with Prometheus alerts and a Grafana dashboard, Kubernetes manifests (Pod Security
+  "restricted", NetworkPolicy, staging / production overlays), and a supply chain with CodeQL,
+  bandit, pip-audit, Trivy, Dependabot and releases that ship an SBOM and build provenance.
 
 Pure Python standard library: no dependencies and no cloud account needed (realistic fake clouds are built in).
 
 ```
 python -m evdc demo                                        # end-to-end walkthrough in the terminal
-python -m unittest discover -s tests -p "test*.py" -t .    # 115 tests
+python -m unittest discover -s tests -p "test*.py" -t .    # 120 tests
 ruff check evdc tests                                      # lint (same as CI)
 python -m evdc serve --config accounts.example.json --sync-interval 300   # API + dashboard on :8080
 ```
@@ -184,6 +190,37 @@ Errors: 400 bad input · 401 no/invalid key · 403 role or org not allowed · 40
 405 wrong method · 409 quota / wrong state / sync running · 501 unsupported action ·
 502 provider still failing after retries.
 
+## Production deployment
+
+| Option | What you get | Guide |
+|---|---|---|
+| docker compose | app + Prometheus (alert rules) + Grafana (dashboard provisioned), hardened container | [deploy/README.md](deploy/README.md) |
+| Kubernetes (Kustomize) | probes, graceful rollout, Pod Security "restricted", NetworkPolicy, ConfigMap / Secret split, staging and production overlays, TLS Ingress | [deploy/README.md](deploy/README.md) |
+
+Probes: `GET /healthz` (liveness) and `GET /readyz` (database reachable, scheduler alive, not
+shutting down; 503 otherwise). On SIGTERM the service reports not-ready, keeps serving for a
+grace period (`--shutdown-grace`), stops accepting connections, finishes in-flight requests and
+closes the database.
+
+## Security and supply chain
+
+| Check | When | Workflow |
+|---|---|---|
+| ruff lint, tests on Python 3.10 – 3.13 with coverage, demo, Docker build + probe smoke test | every PR, pushes to `main` / `dev` | `tests.yml` |
+| CodeQL (Python and the dashboard's JavaScript) | every PR + weekly | `codeql.yml` |
+| bandit (SAST), pip-audit (dependency CVEs incl. cloud SDKs), Trivy (image CVEs) | every PR + daily | `security.yml` |
+| Dependabot for pip, GitHub Actions and the Docker base image | weekly | `dependabot.yml` |
+| Release: wheel, sdist, CycloneDX SBOM, build provenance attestation, multi-arch image on GHCR | on tag `vX.Y.Z` | `release.yml` |
+
+Reporting vulnerabilities: [SECURITY.md](SECURITY.md). Branching, commits and releases:
+[CONTRIBUTING.md](CONTRIBUTING.md). History: [CHANGELOG.md](CHANGELOG.md).
+
+## Design documents
+
+- [Architecture](docs/ARCHITECTURE.md) – layers, key flows, tenancy, resilience, observability
+- [Architecture decision records](docs/adr/) – adapters, safe deletion, stdlib → FastAPI, keys and roles, dry-run policies
+- [Roadmap to an enterprise edition](docs/ROADMAP.md) – FastAPI + PostgreSQL, OIDC, approvals, leases, chargeback, compared with CloudStack, ManageIQ, Mist and Keystone
+
 ## Running with Docker
 
 ```
@@ -217,9 +254,10 @@ evdc/
   logs.py        JSON logging
   app.py         config → clients → adapters; wiring
   api.py         REST API (http.server)
-docs/            AWS.md, ALIYUN.md, AZURE.md: running against real accounts
-tests/           115 unittest cases
-.github/workflows/tests.yml   ruff lint + tests on Python 3.10 – 3.13
+deploy/          docker compose + Prometheus + Grafana; Kubernetes (Kustomize) base and overlays
+docs/            ARCHITECTURE.md, ROADMAP.md, adr/, and AWS / ALIYUN / AZURE guides for real accounts
+tests/           120 unittest cases
+.github/         workflows (tests, codeql, security, release), Dependabot, CODEOWNERS, templates
 Dockerfile       non-root image, data volume, scheduled sync
 ```
 

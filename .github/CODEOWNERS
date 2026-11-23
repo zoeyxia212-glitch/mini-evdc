@@ -1,0 +1,6 @@
+# Every change needs a review from the code owner.
+# Replace OWNER with your GitHub username after creating the repository.
+*                       @OWNER
+/evdc/auth.py           @OWNER
+/evdc/clouds/           @OWNER
+/.github/workflows/     @OWNER

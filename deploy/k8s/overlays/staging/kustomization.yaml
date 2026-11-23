@@ -1,0 +1,16 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: mini-evdc-staging
+resources:
+  - ../../base
+patches:
+  # sync less often than production to save API calls
+  - target: {kind: ConfigMap, name: mini-evdc-config}
+    patch: |-
+      - op: replace
+        path: /data/SYNC_INTERVAL
+        value: "900"
+images:
+  - name: mini-evdc
+    newName: ghcr.io/OWNER/mini-evdc
+    newTag: dev

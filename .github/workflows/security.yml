@@ -1,0 +1,50 @@
+name: security
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+  schedule:
+    - cron: "41 2 * * *"   # daily: new CVEs appear without code changes
+
+permissions:
+  contents: read
+
+jobs:
+  sast:
+    name: Static analysis (bandit)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install bandit
+      # -ll: report medium and high severity only
+      - run: bandit -r evdc -ll
+
+  dependencies:
+    name: Dependency vulnerabilities (pip-audit)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # audit the optional cloud SDK extras too, since production installs them
+      - run: pip install pip-audit ".[all]"
+      - run: pip-audit --skip-editable --progress-spinner off
+
+  image:
+    name: Container image scan (Trivy)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t mini-evdc:scan .
+      # Run the official Trivy image (pinned) instead of the trivy-action wrapper,
+      # whose release tags were tampered with in March 2026.
+      - name: Trivy scan (fail on fixable CRITICAL / HIGH)
+        run: |
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
+            aquasec/trivy:0.57.1 image --no-progress \
+            --severity CRITICAL,HIGH --ignore-unfixed --exit-code 1 mini-evdc:scan

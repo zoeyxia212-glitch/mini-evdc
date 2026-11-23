@@ -7,9 +7,13 @@
 from __future__ import annotations
 
 import argparse
+import logging
 import os
+import signal
 import sys
 import tempfile
+import threading
+import time
 
 from .app import App
 from .clouds.fake import aliyun_throttle
@@ -156,6 +160,8 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--port", type=int, default=8080)
     s.add_argument("--sync-interval", type=float, default=0,
                    help="seconds between automatic syncs (0 = only on POST /sync)")
+    s.add_argument("--shutdown-grace", type=float, default=5.0,
+                   help="seconds to keep serving after SIGTERM while /readyz reports 503")
     u = sub.add_parser("create-user", help="create a user and print its API key")
     u.add_argument("name")
     u.add_argument("--role", default="viewer", choices=["system_admin", "org_admin", "viewer"])
@@ -185,16 +191,39 @@ def main(argv: list[str] | None = None) -> int:
     if args.sync_interval > 0:
         app.start_scheduler(args.sync_interval)
     server = serve(app, args.host, args.port)
+    install_shutdown_handlers(app, server, grace=args.shutdown_grace)
     print(f"Mini EvDC API on http://{args.host}:{args.port}  (Ctrl+C to stop)", file=sys.stderr)
     try:
         server.serve_forever()
-    except KeyboardInterrupt:
-        pass
     finally:
-        if app.scheduler:
-            app.scheduler.stop()
-        server.server_close()
+        server.server_close()       # waits for in-flight request threads to finish
+        app.close()                 # stops the scheduler, closes the database
+        logging.getLogger("evdc").info("stopped", extra={"ctx": {"event": "shutdown_complete"}})
     return 0
+
+
+def install_shutdown_handlers(app, server, grace: float = 5.0) -> None:
+    """Graceful shutdown on SIGTERM (Kubernetes, docker stop) and SIGINT (Ctrl+C).
+
+    1. mark the app as draining, so /readyz returns 503 and the load balancer stops sending traffic
+    2. wait `grace` seconds for that to propagate
+    3. stop accepting connections; serve_forever() returns and main() finishes in-flight requests
+    """
+    log = logging.getLogger("evdc")
+
+    def handle(signum, _frame):
+        if app.draining:
+            return
+        app.draining = True
+        log.info("shutting down", extra={"ctx": {"signal": signal.Signals(signum).name, "grace_s": grace}})
+
+        def stop():
+            time.sleep(grace)
+            server.shutdown()       # must not run on the serve_forever thread
+        threading.Thread(target=stop, name="shutdown", daemon=True).start()
+
+    signal.signal(signal.SIGTERM, handle)
+    signal.signal(signal.SIGINT, handle)
 
 
 if __name__ == "__main__":

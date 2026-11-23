@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mini-evdc"
-version = "1.5.0"
+version = "1.6.0"
 description = "A simplified enterprise virtual data center plus a multi-cloud (Alibaba Cloud, AWS, Azure) integration service"
 readme = "README.md"
 requires-python = ">=3.10"
