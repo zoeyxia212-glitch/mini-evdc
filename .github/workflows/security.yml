@@ -1,0 +1,49 @@
+name: security
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+  schedule:
+    - cron: "41 2 * * *"   # daily: new CVEs appear without code changes
+
+permissions:
+  contents: read
+
+jobs:
+  sast:
+    name: Static analysis (bandit)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install bandit
+      # -ll: report medium and high severity only
+      - run: bandit -r evdc -ll
+
+  dependencies:
+    name: Dependency vulnerabilities (pip-audit)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # audit the optional cloud SDK extras too, since production installs them
+      - run: pip install pip-audit ".[all]"
+      - run: pip-audit --skip-editable --progress-spinner off
+
+  image:
+    name: Container image scan (Trivy)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t mini-evdc:scan .
+      - uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: mini-evdc:scan
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: "1"

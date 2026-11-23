@@ -1,0 +1,36 @@
+name: Bug report
+description: Something does not work as documented
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. python -m evdc serve --config accounts.example.json
+        2. curl ...
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit
+      placeholder: v1.6.0 or a1b2c3d
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options: [Platform core, Multi-cloud sync, Real cloud client, API / auth, Dashboard, Deployment, Other]
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant log lines
+      description: JSON log lines from the server. Remove keys, tokens and account IDs first.
+      render: shell

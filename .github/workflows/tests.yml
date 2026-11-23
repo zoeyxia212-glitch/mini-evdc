@@ -2,7 +2,15 @@ name: tests
 
 on:
   push:
+    branches: [main, dev]
   pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   lint:
@@ -26,7 +34,27 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
-      - name: Unit tests
-        run: python -m unittest discover -s tests -p "test*.py" -t . -v
+      - run: pip install coverage
+      - name: Unit tests with coverage
+        run: |
+          coverage run --source=evdc -m unittest discover -s tests -p "test*.py" -t .
+          coverage report --skip-covered --sort=cover
       - name: Demo runs end to end
         run: python -m evdc demo
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build image
+        run: docker build -t mini-evdc:ci .
+      - name: Container starts and passes its probes
+        run: |
+          docker run -d --name evdc -p 8080:8080 -e EVDC_ADMIN_KEY=ci-admin-key \
+            -v "$PWD/accounts.example.json:/config/accounts.json:ro" \
+            -e ALIYUN_AK=LTAI-demo -e ALIYUN_SK=secret-demo -e AWS_AK=AKIA-demo -e AWS_SK=secret-demo \
+            -e AZ_TENANT=tenant-demo -e AZ_CLIENT=app-demo -e AZ_SECRET=secret-demo mini-evdc:ci
+          for i in $(seq 1 30); do curl -fs localhost:8080/readyz && break; sleep 1; done
+          curl -fs localhost:8080/healthz
+          curl -fs -H "Authorization: Bearer ci-admin-key" -X POST localhost:8080/sync
+          docker stop -t 10 evdc && docker logs evdc | tail -5

@@ -114,6 +114,15 @@ class Store:
         with self._lock:
             self._conn.executescript(SCHEMA)
 
+    def ping(self) -> bool:
+        """Readiness check: can we still run a query?"""
+        try:
+            with self._lock:
+                self._conn.execute("SELECT 1").fetchone()
+            return True
+        except Exception:  # noqa: BLE001 - any failure means not ready
+            return False
+
     def close(self) -> None:
         with self._lock:
             self._conn.close()

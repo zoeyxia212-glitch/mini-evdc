@@ -1,0 +1,8 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: mini-evdc
+  labels:
+    # enforce the "restricted" Pod Security Standard for everything in this namespace
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/audit: restricted

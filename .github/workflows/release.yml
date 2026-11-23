@@ -1,0 +1,68 @@
+name: release
+
+# Push a tag like v1.6.0 (after updating CHANGELOG.md and the version) to publish a release:
+# wheel + sdist + CycloneDX SBOM on the GitHub release, and a multi-arch image on GHCR
+# with SBOM and build-provenance attestations.
+on:
+  push:
+    tags: ["v*.*.*"]
+
+permissions:
+  contents: write
+  packages: write
+  id-token: write
+  attestations: write
+
+jobs:
+  python-package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Version in pyproject matches the tag
+        run: |
+          v=$(python -c "import tomllib;print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
+          test "v$v" = "${GITHUB_REF_NAME}" || { echo "pyproject version $v != tag ${GITHUB_REF_NAME}"; exit 1; }
+      - run: pip install build cyclonedx-bom
+      - run: python -m build
+      - name: SBOM (CycloneDX)
+        run: |
+          python -m venv /tmp/sbom && /tmp/sbom/bin/pip install dist/*.whl
+          cyclonedx-py environment /tmp/sbom --output-format JSON --output-file dist/mini-evdc-sbom.cdx.json
+      - uses: actions/attest-build-provenance@v1
+        with:
+          subject-path: dist/*
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
+
+  container-image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          sbom: true
+          provenance: mode=max

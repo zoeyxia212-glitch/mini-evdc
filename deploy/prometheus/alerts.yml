@@ -1,0 +1,32 @@
+groups:
+  - name: mini-evdc
+    rules:
+      - alert: EvdcDown
+        expr: up{job="mini-evdc"} == 0
+        for: 2m
+        labels: {severity: critical}
+        annotations:
+          summary: Mini EvDC is not answering /metrics
+          description: Prometheus could not scrape {{ $labels.instance }} for 2 minutes.
+
+      - alert: CloudSyncFailing
+        expr: evdc_sync_success == 0
+        for: 15m
+        labels: {severity: warning}
+        annotations:
+          summary: "Sync failing for {{ $labels.provider }}:{{ $labels.account }}"
+          description: The last sync of this account failed for 15 minutes. Check credentials and GET /sync/history.
+
+      - alert: CloudSyncStale
+        expr: time() - evdc_sync_last_timestamp_seconds > 3600
+        for: 10m
+        labels: {severity: warning}
+        annotations:
+          summary: "No sync for {{ $labels.provider }}:{{ $labels.account }} in over an hour"
+
+      - alert: CloudCostJump
+        expr: sum(evdc_monthly_cost_usd) > 1.2 * sum(evdc_monthly_cost_usd offset 1d)
+        for: 1h
+        labels: {severity: info}
+        annotations:
+          summary: Estimated monthly cost rose more than 20% in a day

@@ -1,0 +1,25 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: mini-evdc
+labels:
+  - includeSelectors: true
+    pairs:
+      app.kubernetes.io/name: mini-evdc
+      app.kubernetes.io/part-of: mini-evdc
+resources:
+  - namespace.yaml
+  - serviceaccount.yaml
+  - configmap.yaml
+  - pvc.yaml
+  - deployment.yaml
+  - service.yaml
+  - networkpolicy.yaml
+secretGenerator:
+  # cp secrets.env.example secrets.env and fill it in (secrets.env is git-ignored).
+  # In a real cluster use External Secrets / Sealed Secrets / a CSI secrets driver instead.
+  - name: mini-evdc-secrets
+    envs: [secrets.env]
+images:
+  - name: mini-evdc
+    newName: ghcr.io/OWNER/mini-evdc
+    newTag: "1.6.0"

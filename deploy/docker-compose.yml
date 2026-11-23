@@ -1,0 +1,59 @@
+# Local production-like stack: Mini EvDC + Prometheus (with alert rules) + Grafana (dashboard provisioned).
+#   cd deploy && cp .env.example .env    # then edit the secrets in .env
+#   docker compose up -d --build
+#   API + dashboard http://localhost:8080 · Prometheus http://localhost:9090 · Grafana http://localhost:3000
+name: mini-evdc
+
+services:
+  evdc:
+    build: ..
+    image: mini-evdc:local
+    restart: unless-stopped
+    command: ["evdc", "serve", "--host", "0.0.0.0", "--port", "8080", "--db", "/data/evdc.db",
+              "--sync-interval", "${EVDC_SYNC_INTERVAL:-300}", "--config", "/config/accounts.json",
+              "--shutdown-grace", "5"]
+    env_file: .env
+    ports: ["8080:8080"]
+    volumes:
+      - evdc-data:/data
+      - ../accounts.example.json:/config/accounts.json:ro
+    # hardening: immutable filesystem, no extra privileges, no Linux capabilities
+    read_only: true
+    tmpfs: [/tmp]
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+    stop_grace_period: 20s
+    deploy:
+      resources:
+        limits: {cpus: "1.0", memory: 512M}
+
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    restart: unless-stopped
+    command: ["--config.file=/etc/prometheus/prometheus.yml", "--storage.tsdb.retention.time=15d"]
+    ports: ["9090:9090"]
+    volumes:
+      - ./prometheus:/etc/prometheus:ro
+      - prometheus-data:/prometheus
+    depends_on:
+      evdc:
+        condition: service_healthy
+
+  grafana:
+    image: grafana/grafana:11.3.0
+    restart: unless-stopped
+    ports: ["3000:3000"]
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?set GRAFANA_ADMIN_PASSWORD in deploy/.env}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    depends_on: [prometheus]
+
+volumes:
+  evdc-data:
+  prometheus-data:
+  grafana-data:
