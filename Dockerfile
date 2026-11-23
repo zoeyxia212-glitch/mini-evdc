@@ -18,8 +18,9 @@ RUN apt-get update \
     && apt-get upgrade -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
-# setuptools / wheel are only needed to build the package, so remove them from the
-# runtime image (old copies get flagged by scanners, e.g. CVE-2025-47273).
+# setuptools, wheel and pip are only needed to build the package, so remove them from the
+# runtime image (old vendored copies get flagged by scanners, e.g. CVE-2025-47273).
+# pip's SBOM lists the setuptools it vendors, so pip and ensurepip go too.
 RUN pip install --upgrade pip \
     && pip install . \
     && (pip uninstall -y setuptools wheel || true) \
@@ -27,6 +28,8 @@ RUN pip install --upgrade pip \
               /usr/local/lib/python3*/site-packages/pkg_resources \
               /usr/local/lib/python3*/site-packages/_distutils_hack \
               /usr/local/lib/python3*/site-packages/distutils-precedence.pth \
+    && python -m pip uninstall -y pip \
+    && rm -rf /usr/local/lib/python3*/ensurepip \
     && useradd --create-home --uid 10001 evdc \
     && mkdir /data && chown evdc /data
 
